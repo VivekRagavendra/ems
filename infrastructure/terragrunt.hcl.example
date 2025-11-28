@@ -1,0 +1,66 @@
+# Example Terragrunt configuration
+# Copy to terragrunt.hcl and update with your values
+
+# Generate OpenTofu provider configuration
+generate "provider" {
+  path      = "provider.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<EOF
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+EOF
+}
+
+# Remote state configuration (recommended for production)
+# Uncomment and configure if using S3 backend
+# remote_state {
+#   backend = "s3"
+#   config = {
+#     bucket         = "your-terragrunt-state-bucket"
+#     key            = "${path_relative_to_include()}/terraform.tfstate"
+#     region         = "us-east-1"
+#     encrypt        = true
+#     dynamodb_table = "terraform-locks"
+#   }
+#   generate = {
+#     path      = "backend.tf"
+#     if_exists = "overwrite_terragrunt"
+#   }
+# }
+
+# Inputs passed to OpenTofu
+inputs = {
+  aws_region       = "us-east-1"              # Your AWS region
+  eks_cluster_name = "your-eks-cluster-name"  # Your EKS cluster name
+  project_name     = "eks-app-controller"     # Project name prefix
+  lambda_runtime   = "python3.11"             # Python runtime version
+}
+
+# Cost Optimization Notes:
+# - Lambda functions use 256 MB memory (cost-optimized)
+# - Discovery runs every 2 hours (12x/day)
+# - Health checks run every 15 minutes (96x/day)
+# - Total Lambda invocations: ~10K/month (well within 1M free tier)
+# - Expected cost: $0-1/month (first year), $1-6/month (after free tier)
+
+# Skip dependency optimization
+skip = false
+
+# Prevent accidental destroy (set to true for production)
+prevent_destroy = false
+

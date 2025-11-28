@@ -1,0 +1,68 @@
+---
+# Kubernetes RBAC Configuration for Controller Lambda
+# This grants the Lambda permission to scale Deployments, StatefulSets, and ReplicaSets
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eks-controller-lambda
+  namespace: kube-system
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::420464349284:role/eks-app-controller-controller-lambda-role
+---
+# ClusterRole with permissions to scale workloads
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: eks-controller-lambda-role
+rules:
+  # Deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "patch", "update"]
+  
+  # StatefulSets
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    verbs: ["get", "list", "patch", "update"]
+  
+  # ReplicaSets
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "replicasets/scale"]
+    verbs: ["get", "list", "patch", "update"]
+  
+  # DaemonSets
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "patch"]
+  
+  # Pods (for status checking)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  
+  # Namespaces (for discovery)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding - binds the IAM role to the ClusterRole
+# The Lambda's IAM role is already mapped in aws-auth ConfigMap as:
+# username: eks-controller-lambda
+# groups: system:authenticated
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: eks-controller-lambda-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: eks-controller-lambda-role
+subjects:
+  # Using IAM user mapping (via aws-auth ConfigMap)
+  # The IAM role ARN is already mapped in aws-auth ConfigMap
+  - kind: User
+    name: eks-controller-lambda
+    apiGroup: rbac.authorization.k8s.io
+

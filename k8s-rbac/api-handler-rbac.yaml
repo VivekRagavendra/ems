@@ -1,0 +1,49 @@
+---
+# Kubernetes RBAC Configuration for API Handler Lambda
+# This grants the Lambda permission to list pods for status checking
+
+# ClusterRole with permissions to list pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: eks-api-handler-lambda-role
+rules:
+  # Pods (for status checking)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  
+  # Namespaces (for discovery)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding - binds the IAM role to the ClusterRole
+# The Lambda's IAM role must be mapped in aws-auth ConfigMap as:
+# username: eks-api-handler-lambda
+# groups: system:authenticated
+#
+# To add the mapping, edit the aws-auth ConfigMap:
+# kubectl edit configmap aws-auth -n kube-system
+#
+# Add this entry to mapUsers:
+# - userarn: arn:aws:iam::420464349284:role/eks-app-controller-api-handler-lambda-role
+#   username: eks-api-handler-lambda
+#   groups:
+#   - system:authenticated
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: eks-api-handler-lambda-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: eks-api-handler-lambda-role
+subjects:
+  # Using IAM user mapping (via aws-auth ConfigMap)
+  # The IAM role ARN must be mapped in aws-auth ConfigMap
+  - kind: User
+    name: eks-api-handler-lambda
+    apiGroup: rbac.authorization.k8s.io
+

@@ -1,0 +1,29 @@
+[MASTER]
+ignore=build,dist,.venv,venv,node_modules
+ignore-patterns=test_.*?\.py
+
+[MESSAGES CONTROL]
+disable=
+    too-few-public-methods,
+    too-many-arguments,
+    too-many-locals,
+    too-many-branches,
+    too-many-statements,
+    import-error,
+    no-member
+
+[FORMAT]
+max-line-length=120
+indent-string='  '
+
+[BASIC]
+good-names=i,j,k,ex,Run,_,id,pd,ng,pg,neo4j,app_name,app_data,ng_name,instance_id,db_type,hostname,hostnames
+
+[DESIGN]
+max-args=8
+max-locals=20
+max-returns=6
+max-branches=15
+max-statements=50
+
+

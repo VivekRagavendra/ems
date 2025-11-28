@@ -1,0 +1,62 @@
+# Build artifacts
+build/
+*.zip
+*.tar.gz
+
+# Lambda package directories (build artifacts)
+lambdas/*/package/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Terraform/OpenTofu
+.terraform/
+.terragrunt-cache/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# AWS
+.aws-sam/
+*.pem
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+/tmp/
+
+# Environment variables
+.env
+.env.local
