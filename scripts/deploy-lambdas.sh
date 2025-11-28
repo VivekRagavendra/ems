@@ -38,6 +38,17 @@ package_lambda() {
     # Copy Lambda function code
     cp "$lambda_dir/lambda_function.py" "$temp_dir/"
     
+    # Copy config directory if it exists (for config loader)
+    if [ -d "$lambda_dir/config" ]; then
+        cp -r "$lambda_dir/config" "$temp_dir/"
+    fi
+    
+    # Copy config.yaml to Lambda package root (for Lambda runtime)
+    if [ -f "$PROJECT_ROOT/config/config.yaml" ]; then
+        mkdir -p "$temp_dir/config"
+        cp "$PROJECT_ROOT/config/config.yaml" "$temp_dir/config/"
+    fi
+    
     # Install dependencies if requirements.txt exists
     if [ -f "$lambda_dir/requirements.txt" ]; then
         echo "Installing dependencies for $lambda_name..."

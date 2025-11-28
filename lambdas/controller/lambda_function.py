@@ -13,6 +13,35 @@ from botocore.exceptions import ClientError
 from kubernetes import client, config
 from urllib.parse import urlparse
 
+# Import config loader
+try:
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_nodegroup_defaults
+    )
+except ImportError:
+    # Fallback for local testing or if config module not available
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_nodegroup_defaults
+    )
+
+# Load configuration (cached after first load)
+try:
+    CONFIG = get_config()
+    EKS_CLUSTER_NAME = get_eks_cluster_name()
+    TABLE_NAME = get_dynamodb_table_name()
+    NODEGROUP_DEFAULTS_DICT = get_nodegroup_defaults()
+except Exception as e:
+    # Fallback to environment variables if config loading fails
+    print(f"⚠️ Warning: Could not load config.yaml: {e}")
+    print("⚠️ Falling back to environment variables")
+    EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
+    TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
+    NODEGROUP_DEFAULTS_DICT = {}
+
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
 ec2 = boto3.client('ec2')
@@ -60,34 +89,9 @@ def get_bearer_token(cluster_name):
     base64_url = base64.urlsafe_b64encode(signed_url.encode('utf-8')).decode('utf-8')
     return 'k8s-aws-v1.' + base64_url.rstrip('=')
 
-# DynamoDB table name
-TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
-EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
-
-# NodeGroup Default Values - Authoritative Source
-# If mapping is null, the application has no NodeGroup → only scale pods
-NODEGROUP_DEFAULTS = {
-    "ai360.dev.mareana.com": {"nodegroup": "ai360-ondemand", "desired": 1, "min": 1, "max": 2},
-    "ebr.dev.mareana.com": {"nodegroup": "vsm-dev", "desired": 1, "min": 1, "max": 2},
-    "flux.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "grafana.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "k8s-dashboard.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "prometheus.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "gtag.dev.mareana.com": {"nodegroup": "gtag-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1-airflow.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1-spark.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-app-airflow.cloud.mareana.com": {"nodegroup": "mi-app-new", "desired": 2, "min": 1, "max": 2},
-    "mi-spark.dev.mareana.com": {"nodegroup": "mi-app-new", "desired": 1, "min": 1, "max": 2},
-    "mi.dev.mareana.com": {"nodegroup": "mi-app-new", "desired": 1, "min": 1, "max": 2},
-    "vsm-bms.dev.mareana.com": None,
-    "vsm.dev.mareana.com": {"nodegroup": "vsm-dev-ng", "desired": 1, "min": 1, "max": 2},
-    "lab.dev.mareana.com": {"nodegroup": "lab-dev", "desired": 1, "min": 1, "max": 2}
-}
-
 def get_nodegroup_defaults(app_name):
     """Get NodeGroup defaults for an application from the authoritative mapping."""
-    return NODEGROUP_DEFAULTS.get(app_name)
+    return NODEGROUP_DEFAULTS_DICT.get(app_name)
 
 def get_app_from_registry(app_name):
     """Retrieve application information from DynamoDB."""
@@ -371,11 +375,19 @@ def check_database_health(host, port, db_type='postgres'):
         print(f"      ❌ {db_type.upper()} {host}:{port} check failed: {str(e)}")
         return False
 
-def is_shared_resource_in_use(resource_host, resource_type, current_app_name):
+def get_sharing_applications(resource_host, resource_type, current_app_name):
     """
-    Check if a shared resource (Postgres/Neo4j) is in use by other applications.
-    Returns True if other apps are using it, False if only current app uses it.
+    Get all applications that share a database resource (Postgres or Neo4j).
+    
+    Args:
+        resource_host: Database host IP address
+        resource_type: 'postgres' or 'neo4j'
+        current_app_name: Name of the app being stopped (excluded from results)
+    
+    Returns:
+        List of app names that share this database
     """
+    sharing_apps = []
     try:
         table = dynamodb.Table(TABLE_NAME)
         response = table.scan()
@@ -389,22 +401,119 @@ def is_shared_resource_in_use(resource_host, resource_type, current_app_name):
             if resource_type == 'postgres':
                 app_postgres_host = item.get('postgres_host')
                 if app_postgres_host == resource_host:
-                    # Check if this app is running (has active deployments)
-                    app_status = item.get('status', 'DOWN')
-                    if app_status == 'UP':
-                        return True
+                    sharing_apps.append(app_name)
             elif resource_type == 'neo4j':
                 app_neo4j_host = item.get('neo4j_host')
                 if app_neo4j_host == resource_host:
-                    # Check if this app is running
-                    app_status = item.get('status', 'DOWN')
-                    if app_status == 'UP':
-                        return True
+                    sharing_apps.append(app_name)
         
+        return sharing_apps
+    except Exception as e:
+        print(f"⚠️  Error finding sharing applications: {str(e)}")
+        return []
+
+def check_app_status_live(app_name):
+    """
+    Check if an application is UP using live HTTP check.
+    Calls the API Handler's live status check logic.
+    
+    Args:
+        app_name: Application name to check
+    
+    Returns:
+        True if app is UP (HTTP 200), False otherwise
+    """
+    try:
+        # Get app metadata to find hostname
+        app_data = get_app_from_registry(app_name)
+        if not app_data:
+            print(f"   ⚠️  App {app_name} not found in registry")
+            return False
+        
+        hostnames = app_data.get('hostnames', [])
+        if not hostnames:
+            print(f"   ⚠️  App {app_name} has no hostnames")
+            return False
+        
+        # Try each hostname until one responds
+        primary_hostname = hostnames[0] if isinstance(hostnames, list) else hostnames
+        
+        # Build URLs to try (HTTPS first, then HTTP)
+        urls_to_try = []
+        if primary_hostname:
+            urls_to_try.append(f"https://{primary_hostname}")
+            urls_to_try.append(f"http://{primary_hostname}")
+        
+        # Perform HTTP HEAD request (faster than GET)
+        for url in urls_to_try:
+            try:
+                response = requests.head(url, timeout=5, verify=False, allow_redirects=True)
+                # STRICT: Only HTTP 200 = UP
+                if response.status_code == 200:
+                    print(f"   ✅ {app_name} is UP (HTTP 200 from {url})")
+                    return True
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.SSLError):
+                continue
+            except Exception:
+                continue
+        
+        print(f"   ❌ {app_name} is DOWN (no HTTP 200 response)")
         return False
     except Exception as e:
-        print(f"Error checking if shared resource is in use: {str(e)}")
-        # Conservative: assume it's in use if we can't check
+        print(f"   ⚠️  Error checking live status for {app_name}: {str(e)}")
+        # Conservative: assume UP if we can't check (prevents stopping DB)
+        return True
+
+def are_any_apps_running(app_list):
+    """
+    Check if ANY applications in the list are currently running (UP).
+    Uses live HTTP checks for accurate status.
+    
+    Args:
+        app_list: List of application names to check
+    
+    Returns:
+        True if ANY app is UP, False if ALL are DOWN
+    """
+    if not app_list:
+        return False
+    
+    print(f"   🔍 Checking live status of {len(app_list)} sharing application(s)...")
+    for app_name in app_list:
+        if check_app_status_live(app_name):
+            return True
+    
+    return False
+
+def is_shared_resource_in_use(resource_host, resource_type, current_app_name):
+    """
+    Check if a shared resource (Postgres/Neo4j) is in use by other applications.
+    Uses LIVE HTTP checks instead of stale DynamoDB status.
+    
+    Returns True if other apps are using it AND are UP, False otherwise.
+    """
+    try:
+        # Get all apps sharing this database
+        sharing_apps = get_sharing_applications(resource_host, resource_type, current_app_name)
+        
+        if not sharing_apps:
+            print(f"   ℹ️  No other applications share this {resource_type} database")
+            return False
+        
+        print(f"   ℹ️  {resource_type.upper()} {resource_host} is shared with: {', '.join(sharing_apps)}")
+        
+        # Check if ANY sharing app is currently UP (using live HTTP checks)
+        any_running = are_any_apps_running(sharing_apps)
+        
+        if any_running:
+            print(f"   ⚠️  Database is in use by active applications - will NOT stop")
+            return True
+        else:
+            print(f"   ✅ All sharing applications are DOWN - safe to stop database")
+            return False
+    except Exception as e:
+        print(f"⚠️  Error checking if shared resource is in use: {str(e)}")
+        # Conservative: assume it's in use if we can't check (prevents stopping DB)
         return True
 
 def is_database_shared(app_data, db_type='postgres'):
@@ -1599,11 +1708,11 @@ def stop_application(app_name):
     stopped_pg_count = 0
     if postgres_host:
         if postgres_shared:
-            print(f"   ℹ️  PostgreSQL is SHARED - checking if in use by other apps...")
-            # Special case: Stop shared DB only if no other apps are using it
+            print(f"   ℹ️  PostgreSQL {postgres_host} is SHARED - checking if other apps are UP...")
+            # Special case: Stop shared DB only if ALL other apps using it are DOWN
             if is_shared_resource_in_use(postgres_host, 'postgres', app_name):
-                print(f"   ℹ️  Shared PostgreSQL {postgres_host} is in use by other apps - skipping stop")
-                results['warnings'].append(f"PostgreSQL {postgres_host} is shared and in use - skipping stop")
+                print(f"   ⚠️  Shared PostgreSQL {postgres_host} is in use by active applications - SKIPPING STOP")
+                results['warnings'].append(f"PostgreSQL {postgres_host} is shared with active applications - database NOT stopped")
             else:
                 print(f"   🔄 Shared PostgreSQL {postgres_host} is NOT in use - stopping EC2 instance...")
                 # Find EC2 instance by private IP
@@ -1679,11 +1788,11 @@ def stop_application(app_name):
     stopped_neo4j_count = 0
     if neo4j_host:
         if neo4j_shared:
-            print(f"   ℹ️  Neo4j is SHARED - checking if in use by other apps...")
-            # Special case: Stop shared DB only if no other apps are using it
+            print(f"   ℹ️  Neo4j {neo4j_host} is SHARED - checking if other apps are UP...")
+            # Special case: Stop shared DB only if ALL other apps using it are DOWN
             if is_shared_resource_in_use(neo4j_host, 'neo4j', app_name):
-                print(f"   ℹ️  Shared Neo4j {neo4j_host} is in use by other apps - skipping stop")
-                results['warnings'].append(f"Neo4j {neo4j_host} is shared and in use - skipping stop")
+                print(f"   ⚠️  Shared Neo4j {neo4j_host} is in use by active applications - SKIPPING STOP")
+                results['warnings'].append(f"Neo4j {neo4j_host} is shared with active applications - database NOT stopped")
             else:
                 print(f"   🔄 Shared Neo4j {neo4j_host} is NOT in use - stopping EC2 instance...")
                 # Find EC2 instance by private IP

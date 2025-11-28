@@ -14,41 +14,45 @@ from kubernetes import client, config
 from botocore.exceptions import ClientError
 from botocore.signers import RequestSigner
 
+# Import config loader
+try:
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_app_namespace_mapping
+    )
+except ImportError:
+    # Fallback for local testing or if config module not available
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_app_namespace_mapping
+    )
+
+# Load configuration (cached after first load)
+try:
+    CONFIG = get_config()
+    EKS_CLUSTER_NAME = get_eks_cluster_name()
+    TABLE_NAME = get_dynamodb_table_name()
+    APP_NAMESPACE_MAPPING = get_app_namespace_mapping()
+except Exception as e:
+    # Fallback to environment variables if config loading fails
+    print(f"⚠️ Warning: Could not load config.yaml: {e}")
+    print("⚠️ Falling back to environment variables")
+    EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
+    TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
+    APP_NAMESPACE_MAPPING = {}
+
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
 ec2 = boto3.client('ec2')
 eks_client = boto3.client('eks')
 sts = boto3.client('sts')
 
-# DynamoDB table name
-TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
-EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
-
-# Hard-coded application → namespace mapping (authoritative)
-# These values override any auto-discovered or inferred namespaces
-APP_NAMESPACE_MAPPING = {
-    "ai360.dev.mareana.com": "ai360",
-    "ebr.dev.mareana.com": "ebr-dev",
-    "flux.dev.mareana.com": "flux-system",
-    "grafana.dev.mareana.com": "monitoring",
-    "gtag.dev.mareana.com": "gtag-dev",
-    "k8s-dashboard.dev.mareana.com": "kubernetes-dashboard",
-    "mi-app-airflow.cloud.mareana.com": "mi-app",
-    "mi-r1-airflow.dev.mareana.com": "mi-r1-dev",
-    "mi-r1-spark.dev.mareana.com": "mi-r1-dev",
-    "mi-r1.dev.mareana.com": "mi-r1-dev",
-    "mi-spark.dev.mareana.com": "mi-app",
-    "mi.dev.mareana.com": "mi-app",
-    "prometheus.dev.mareana.com": "monitoring",
-    "vsm-bms.dev.mareana.com": "vsm-bms",
-    "vsm.dev.mareana.com": "vsm-dev",
-    "lab.dev.mareana.com": "lab-dev"
-}
-
 def get_namespace_for_app(app_name, discovered_namespace=None):
     """
     Get the correct namespace for an application.
-    Uses hard-coded mapping if available, otherwise falls back to discovered namespace.
+    Uses config mapping if available, otherwise falls back to discovered namespace.
     
     Args:
         app_name: Application hostname (e.g., "mi.dev.mareana.com")
@@ -526,63 +530,112 @@ def get_configmap_database_details(namespace):
     return db_config
 
 def check_shared_resources(app_name, postgres_instances, neo4j_instances):
-    """Check if any database instances are shared with other applications."""
+    """
+    Check if any database instances are shared with other applications.
+    Uses both EC2 tags AND DynamoDB registry to find all sharing apps.
+    """
     shared_info = {
         'postgres': [],
         'neo4j': []
     }
     
-    # Check PostgreSQL instances
-    for pg in postgres_instances:
-        if pg['shared']:
-            try:
-                all_apps_filter = [
-                    {'Name': 'tag:Component', 'Values': ['postgres']},
-                    {'Name': 'instance-id', 'Values': [pg['instance_id']]}
-                ]
-                all_apps_response = ec2.describe_instances(Filters=all_apps_filter)
-                
-                linked_apps = set()
-                for res in all_apps_response.get('Reservations', []):
-                    for inst in res.get('Instances', []):
-                        inst_tags = {tag['Key']: tag['Value'] for tag in inst.get('Tags', [])}
-                        linked_app = inst_tags.get('AppName')
-                        if linked_app and linked_app != app_name:
-                            linked_apps.add(linked_app)
-                
-                if linked_apps:
-                    shared_info['postgres'].append({
-                        'host': pg.get('private_ip'),  # Use host/IP instead of instance_id
-                        'linked_apps': list(linked_apps)
-                    })
-            except Exception as e:
-                print(f"Error checking shared postgres {pg['instance_id']}: {str(e)}")
+    # Get database IPs for this app
+    postgres_ips = {pg.get('private_ip') for pg in postgres_instances if pg.get('private_ip')}
+    neo4j_ips = {neo.get('private_ip') for neo in neo4j_instances if neo.get('private_ip')}
     
-    # Check Neo4j instances
-    for neo4j in neo4j_instances:
-        if neo4j['shared']:
-            try:
-                all_apps_filter = [
-                    {'Name': 'tag:Component', 'Values': ['neo4j']},
-                    {'Name': 'instance-id', 'Values': [neo4j['instance_id']]}
-                ]
-                all_apps_response = ec2.describe_instances(Filters=all_apps_filter)
+    # Also check if databases are marked as shared via EC2 tags
+    postgres_shared_ips = {pg.get('private_ip') for pg in postgres_instances if pg.get('shared') and pg.get('private_ip')}
+    neo4j_shared_ips = {neo.get('private_ip') for neo in neo4j_instances if neo.get('shared') and neo.get('private_ip')}
+    
+    # Scan DynamoDB to find all apps using the same database IPs
+    try:
+        table = dynamodb.Table(TABLE_NAME)
+        response = table.scan()
+        
+        # Find apps sharing PostgreSQL
+        for pg_ip in postgres_ips | postgres_shared_ips:
+            linked_apps = set()
+            
+            # Method 1: Check EC2 tags (if instance is tagged as shared)
+            if pg_ip in postgres_shared_ips:
+                try:
+                    pg_instance = next((pg for pg in postgres_instances if pg.get('private_ip') == pg_ip), None)
+                    if pg_instance:
+                        all_apps_filter = [
+                            {'Name': 'tag:Component', 'Values': ['postgres']},
+                            {'Name': 'instance-id', 'Values': [pg_instance['instance_id']]}
+                        ]
+                        all_apps_response = ec2.describe_instances(Filters=all_apps_filter)
+                        
+                        for res in all_apps_response.get('Reservations', []):
+                            for inst in res.get('Instances', []):
+                                inst_tags = {tag['Key']: tag['Value'] for tag in inst.get('Tags', [])}
+                                linked_app = inst_tags.get('AppName')
+                                if linked_app and linked_app != app_name:
+                                    linked_apps.add(linked_app)
+                except Exception as e:
+                    print(f"  ⚠️  Error checking EC2 tags for postgres {pg_ip}: {str(e)}")
+            
+            # Method 2: Scan DynamoDB for apps with same postgres_host
+            for item in response.get('Items', []):
+                other_app = item.get('app_name')
+                if other_app == app_name:
+                    continue
                 
-                linked_apps = set()
-                for res in all_apps_response.get('Reservations', []):
-                    for inst in res.get('Instances', []):
-                        inst_tags = {tag['Key']: tag['Value'] for tag in inst.get('Tags', [])}
-                        linked_app = inst_tags.get('AppName')
-                        if linked_app and linked_app != app_name:
-                            linked_apps.add(linked_app)
+                other_pg_host = item.get('postgres_host')
+                if other_pg_host == pg_ip:
+                    linked_apps.add(other_app)
+            
+            if linked_apps:
+                shared_info['postgres'].append({
+                    'host': pg_ip,
+                    'linked_apps': sorted(list(linked_apps))
+                })
+                print(f"  ✅ PostgreSQL {pg_ip} is shared with: {', '.join(sorted(linked_apps))}")
+        
+        # Find apps sharing Neo4j
+        for neo4j_ip in neo4j_ips | neo4j_shared_ips:
+            linked_apps = set()
+            
+            # Method 1: Check EC2 tags (if instance is tagged as shared)
+            if neo4j_ip in neo4j_shared_ips:
+                try:
+                    neo4j_instance = next((neo for neo in neo4j_instances if neo.get('private_ip') == neo4j_ip), None)
+                    if neo4j_instance:
+                        all_apps_filter = [
+                            {'Name': 'tag:Component', 'Values': ['neo4j']},
+                            {'Name': 'instance-id', 'Values': [neo4j_instance['instance_id']]}
+                        ]
+                        all_apps_response = ec2.describe_instances(Filters=all_apps_filter)
+                        
+                        for res in all_apps_response.get('Reservations', []):
+                            for inst in res.get('Instances', []):
+                                inst_tags = {tag['Key']: tag['Value'] for tag in inst.get('Tags', [])}
+                                linked_app = inst_tags.get('AppName')
+                                if linked_app and linked_app != app_name:
+                                    linked_apps.add(linked_app)
+                except Exception as e:
+                    print(f"  ⚠️  Error checking EC2 tags for neo4j {neo4j_ip}: {str(e)}")
+            
+            # Method 2: Scan DynamoDB for apps with same neo4j_host
+            for item in response.get('Items', []):
+                other_app = item.get('app_name')
+                if other_app == app_name:
+                    continue
                 
-                if linked_apps:
-                    shared_info['neo4j'].append({
-                        'host': neo4j.get('private_ip'),  # Use host/IP instead of instance_id
-                        'linked_apps': list(linked_apps)
-                    })
-            except Exception as e:
-                print(f"Error checking shared neo4j {neo4j['instance_id']}: {str(e)}")
+                other_neo4j_host = item.get('neo4j_host')
+                if other_neo4j_host == neo4j_ip:
+                    linked_apps.add(other_app)
+            
+            if linked_apps:
+                shared_info['neo4j'].append({
+                    'host': neo4j_ip,
+                    'linked_apps': sorted(list(linked_apps))
+                })
+                print(f"  ✅ Neo4j {neo4j_ip} is shared with: {', '.join(sorted(linked_apps))}")
+    
+    except Exception as e:
+        print(f"  ⚠️  Error checking shared resources: {str(e)}")
     
     return shared_info
 

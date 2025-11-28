@@ -1,0 +1,157 @@
+# EKS Application Start/Stop Controller Configuration
+# This is the SINGLE SOURCE OF TRUTH for all account-specific settings
+# Change ONLY this file when deploying to a new AWS account
+
+# AWS Account Configuration
+aws:
+  account_id: "420464349284"
+  region: "us-east-1"
+
+# EKS Cluster Configuration
+eks:
+  cluster_name: "mi-eks-cluster"
+
+# DynamoDB Configuration
+dynamodb:
+  table_name: "eks-app-controller-registry"
+
+# S3 Configuration
+s3:
+  ui_bucket_name: "eks-app-controller-ui"  # Update with your bucket name
+
+# API Gateway Configuration
+api_gateway:
+  stage_name: "prod"  # API Gateway stage name
+
+# EC2 Tag Configuration
+ec2_tags:
+  app_name_key: "AppName"
+  component_key: "Component"
+  shared_key: "Shared"
+
+# Application to Namespace Mapping (Authoritative)
+# Format: "hostname": "namespace"
+app_namespace_mapping:
+  "ai360.dev.mareana.com": "ai360"
+  "ebr.dev.mareana.com": "ebr-dev"
+  "flux.dev.mareana.com": "flux-system"
+  "grafana.dev.mareana.com": "monitoring"
+  "gtag.dev.mareana.com": "gtag-dev"
+  "k8s-dashboard.dev.mareana.com": "kubernetes-dashboard"
+  "mi-app-airflow.cloud.mareana.com": "mi-app"
+  "mi-r1-airflow.dev.mareana.com": "mi-r1-dev"
+  "mi-r1-spark.dev.mareana.com": "mi-r1-dev"
+  "mi-r1.dev.mareana.com": "mi-r1-dev"
+  "mi-spark.dev.mareana.com": "mi-app"
+  "mi.dev.mareana.com": "mi-app"
+  "prometheus.dev.mareana.com": "monitoring"
+  "vsm-bms.dev.mareana.com": "vsm-bms"
+  "vsm.dev.mareana.com": "vsm-dev"
+  "lab.dev.mareana.com": "lab-dev"
+
+# NodeGroup Defaults (Authoritative)
+# Format: "hostname": {nodegroup: "name", desired: N, min: N, max: N}
+# Set to null if application has no NodeGroup (only scales pods)
+nodegroup_defaults:
+  "ai360.dev.mareana.com":
+    nodegroup: "ai360-ondemand"
+    desired: 1
+    min: 1
+    max: 2
+  "ebr.dev.mareana.com":
+    nodegroup: "vsm-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "flux.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "grafana.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "k8s-dashboard.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "prometheus.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "gtag.dev.mareana.com":
+    nodegroup: "gtag-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1-airflow.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1-spark.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-app-airflow.cloud.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 2
+    min: 1
+    max: 2
+  "mi-spark.dev.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 1
+    min: 1
+    max: 2
+  "mi.dev.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 1
+    min: 1
+    max: 2
+  "vsm-bms.dev.mareana.com": null
+  "vsm.dev.mareana.com":
+    nodegroup: "vsm-dev-ng"
+    desired: 1
+    min: 1
+    max: 2
+  "lab.dev.mareana.com":
+    nodegroup: "lab-dev"
+    desired: 1
+    min: 1
+    max: 2
+
+# EventBridge Schedule Configuration
+eventbridge:
+  discovery_schedule: "rate(2 hours)"
+  health_check_schedule: "rate(15 minutes)"
+
+# Lambda Configuration
+lambda:
+  runtime: "python3.11"
+  memory_size: 256  # MB
+  timeout: 90  # seconds
+
+# Health Check Configuration
+health_check:
+  timeout: 5  # seconds
+  retry_count: 3
+
+# UI Configuration
+ui:
+  auto_refresh_interval: 30  # seconds
+  api_url: ""  # Will be set dynamically from API Gateway after deployment
+
+# Project Configuration
+project:
+  name: "eks-app-controller"  # Used for resource naming
+

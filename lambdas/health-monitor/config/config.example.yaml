@@ -1,0 +1,76 @@
+# EKS Application Start/Stop Controller Configuration Template
+# Copy this file to config/config.yaml and update with your values
+# This is the SINGLE SOURCE OF TRUTH for all account-specific settings
+
+# AWS Account Configuration
+aws:
+  account_id: "YOUR_AWS_ACCOUNT_ID"  # e.g., "123456789012"
+  region: "us-east-1"  # Your AWS region
+
+# EKS Cluster Configuration
+eks:
+  cluster_name: "YOUR_EKS_CLUSTER_NAME"  # e.g., "my-eks-cluster"
+
+# DynamoDB Configuration
+dynamodb:
+  table_name: "eks-app-controller-registry"  # DynamoDB table name
+
+# S3 Configuration
+s3:
+  ui_bucket_name: "YOUR_S3_BUCKET_NAME"  # S3 bucket for UI hosting
+
+# API Gateway Configuration
+api_gateway:
+  stage_name: "prod"  # API Gateway stage name
+
+# EC2 Tag Configuration
+ec2_tags:
+  app_name_key: "AppName"  # EC2 tag key for application name
+  component_key: "Component"  # EC2 tag key for component type
+  shared_key: "Shared"  # EC2 tag key for shared resources
+
+# Application to Namespace Mapping (Authoritative)
+# Format: "hostname": "namespace"
+# Add your application hostnames and their corresponding Kubernetes namespaces
+app_namespace_mapping:
+  "app1.example.com": "namespace1"
+  "app2.example.com": "namespace2"
+  # Add more mappings as needed
+
+# NodeGroup Defaults (Authoritative)
+# Format: "hostname": {nodegroup: "name", desired: N, min: N, max: N}
+# Set to null if application has no NodeGroup (only scales pods)
+nodegroup_defaults:
+  "app1.example.com":
+    nodegroup: "nodegroup-name"
+    desired: 1
+    min: 1
+    max: 2
+  "app2.example.com": null  # No NodeGroup, only pod scaling
+  # Add more mappings as needed
+
+# EventBridge Schedule Configuration
+eventbridge:
+  discovery_schedule: "rate(2 hours)"  # How often to run discovery
+  health_check_schedule: "rate(15 minutes)"  # How often to run health checks
+
+# Lambda Configuration
+lambda:
+  runtime: "python3.11"  # Python runtime version
+  memory_size: 256  # MB
+  timeout: 90  # seconds
+
+# Health Check Configuration
+health_check:
+  timeout: 5  # seconds
+  retry_count: 3
+
+# UI Configuration
+ui:
+  auto_refresh_interval: 30  # seconds
+  api_url: ""  # Will be set dynamically from API Gateway after deployment
+
+# Project Configuration
+project:
+  name: "eks-app-controller"  # Used for resource naming
+

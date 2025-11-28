@@ -60,3 +60,7 @@ temp/
 # Environment variables
 .env
 .env.local
+
+# Configuration (contains account-specific secrets)
+config/config.yaml
+!config/config.example.yaml

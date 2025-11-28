@@ -14,14 +14,35 @@ from datetime import datetime
 from botocore.exceptions import ClientError
 from urllib.parse import urlparse
 
+# Import config loader
+try:
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name
+    )
+except ImportError:
+    # Fallback for local testing or if config module not available
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name
+    )
+
+# Load configuration (cached after first load)
+try:
+    CONFIG = get_config()
+    EKS_CLUSTER_NAME = get_eks_cluster_name()
+    TABLE_NAME = get_dynamodb_table_name()
+except Exception as e:
+    # Fallback to environment variables if config loading fails
+    print(f"⚠️ Warning: Could not load config.yaml: {e}")
+    print("⚠️ Falling back to environment variables")
+    EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
+    TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
+
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
 ec2 = boto3.client('ec2')
 eks_client = boto3.client('eks')
-
-# DynamoDB table name
-TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
-EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME')
 
 def get_all_apps():
     """Get all applications from registry."""

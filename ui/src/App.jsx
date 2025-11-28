@@ -4,15 +4,15 @@ import Login from './components/Login'
 import { getAuthToken, isAuthenticated, signOut } from './auth/cognito'
 
 // Get API URL from environment or use default
-// This is the API Gateway URL - update if your API Gateway changes
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://6rgavd4jt7.execute-api.us-east-1.amazonaws.com'
+// Priority: VITE_API_URL env var > default
+// Note: config.json is loaded dynamically in useEffect below
+const API_BASE_URL_DEFAULT = import.meta.env.VITE_API_URL || 'https://YOUR_API_GATEWAY_URL.execute-api.us-east-1.amazonaws.com'
 
 // Check if Cognito is configured (optional - allows fallback to no-auth mode)
 const COGNITO_ENABLED = !!(import.meta.env.VITE_COGNITO_USER_POOL_ID && import.meta.env.VITE_COGNITO_CLIENT_ID)
 
-// Log API URL for debugging (remove in production if needed)
+// Log Cognito status for debugging (remove in production if needed)
 if (typeof window !== 'undefined') {
-  console.log('API Base URL:', API_BASE_URL)
   console.log('Cognito Enabled:', COGNITO_ENABLED)
 }
 
@@ -86,7 +86,7 @@ function App() {
         setIsRefreshing(true)
       }
       
-      console.log('Fetching apps from:', `${API_BASE_URL}/apps`)
+      console.log('Fetching apps from:', `${apiBaseUrl}/apps`)
       
       // Build headers with authentication token if Cognito is enabled
       const headers = {
@@ -109,7 +109,7 @@ function App() {
         }
       }
       
-      const response = await fetch(`${API_BASE_URL}/apps`, {
+      const response = await fetch(`${apiBaseUrl}/apps`, {
         method: 'GET',
         mode: 'cors',
         cache: 'no-cache',
@@ -127,6 +127,16 @@ function App() {
       
       const data = await response.json()
       console.log('Apps received:', data.apps?.length || 0)
+      
+      // Debug: Log pod data for first app
+      if (data.apps && data.apps.length > 0) {
+        const firstApp = data.apps[0]
+        console.log('Sample app pod data:', {
+          app: firstApp.name || firstApp.app_name,
+          pods: firstApp.pods,
+          namespace: firstApp.namespace
+        })
+      }
       
       // Normalize API response format (new format -> old format for UI compatibility)
       const normalizedApps = (data.apps || []).map(app => {
@@ -235,7 +245,7 @@ function App() {
       }
       
       // Get preview
-      const previewResponse = await fetch(`${API_BASE_URL}/start?dry_run=true`, {
+      const previewResponse = await fetch(`${apiBaseUrl}/start?dry_run=true`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ app_name: appName })
@@ -339,7 +349,7 @@ function App() {
         }
       }
       
-      const response = await fetch(`${API_BASE_URL}/start`, {
+      const response = await fetch(`${apiBaseUrl}/start`, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody)
@@ -430,7 +440,7 @@ function App() {
         }
       }
       
-      const response = await fetch(`${API_BASE_URL}/stop`, {
+      const response = await fetch(`${apiBaseUrl}/stop`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ app_name: appName })

@@ -31,6 +31,19 @@ build_lambda() {
     echo "Copying Lambda code..."
     cp "$lambda_dir/lambda_function.py" "$build_dir/"
     
+    # Copy config directory if it exists (for config loader)
+    if [ -d "$lambda_dir/config" ]; then
+        echo "Copying config module..."
+        cp -r "$lambda_dir/config" "$build_dir/"
+    fi
+    
+    # Copy config.yaml to Lambda package (for Lambda runtime)
+    if [ -f "config/config.yaml" ]; then
+        echo "Copying config.yaml..."
+        mkdir -p "$build_dir/config"
+        cp "config/config.yaml" "$build_dir/config/"
+    fi
+    
     # Create ZIP
     echo "Creating ZIP package..."
     cd "$build_dir"

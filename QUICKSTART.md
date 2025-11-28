@@ -1,5 +1,34 @@
 # Quick Start Guide
 
+## ⚙️ Configuration First!
+
+**Before deploying, configure your AWS account settings:**
+
+1. Copy the example configuration:
+   ```bash
+   cp config/config.example.yaml config/config.yaml
+   ```
+
+2. Edit `config/config.yaml` with your AWS account details:
+   ```yaml
+   aws:
+     account_id: "123456789012"  # Your AWS account ID
+     region: "us-east-1"         # Your AWS region
+   
+   eks:
+     cluster_name: "my-eks-cluster"  # Your EKS cluster name
+   
+   # ... update other values as needed
+   ```
+
+3. Continue with deployment below - all components will use these values automatically!
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for complete configuration guide.
+
+---
+
+# Quick Start Guide (Deployment)
+
 Get the EKS Application Controller up and running in 15 minutes.
 
 ## Prerequisites Check

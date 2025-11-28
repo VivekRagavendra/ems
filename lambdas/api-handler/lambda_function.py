@@ -14,6 +14,37 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from kubernetes import client, config
 from botocore.exceptions import ClientError
 
+# Import config loader
+try:
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_app_namespace_mapping, get_nodegroup_defaults
+    )
+except ImportError:
+    # Fallback for local testing or if config module not available
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from config.loader import (
+        get_config, get_eks_cluster_name, get_dynamodb_table_name,
+        get_app_namespace_mapping, get_nodegroup_defaults
+    )
+
+# Load configuration (cached after first load)
+try:
+    CONFIG = get_config()
+    EKS_CLUSTER_NAME = get_eks_cluster_name()
+    TABLE_NAME = get_dynamodb_table_name()
+    APP_NAMESPACE_MAPPING = get_app_namespace_mapping()
+    NODEGROUP_DEFAULTS = get_nodegroup_defaults()
+except Exception as e:
+    # Fallback to environment variables if config loading fails
+    print(f"⚠️ Warning: Could not load config.yaml: {e}")
+    print("⚠️ Falling back to environment variables")
+    EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME', 'mi-eks-cluster')
+    TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
+    APP_NAMESPACE_MAPPING = {}
+    NODEGROUP_DEFAULTS = {}
+
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
 eks_client = boto3.client('eks')
@@ -27,57 +58,13 @@ _ec2_instance_cache = {}
 _cache_timestamps = {}
 CACHE_TTL = 30  # seconds
 
-# DynamoDB table name (only used for app metadata, NOT for status)
-TABLE_NAME = os.environ.get('REGISTRY_TABLE_NAME', 'eks-app-registry')
-EKS_CLUSTER_NAME = os.environ.get('EKS_CLUSTER_NAME', 'mi-eks-cluster')
-
-# Hard-coded application → namespace mapping (authoritative)
-APP_NAMESPACE_MAPPING = {
-    "ai360.dev.mareana.com": "ai360",
-    "ebr.dev.mareana.com": "ebr-dev",
-    "flux.dev.mareana.com": "flux-system",
-    "grafana.dev.mareana.com": "monitoring",
-    "gtag.dev.mareana.com": "gtag-dev",
-    "k8s-dashboard.dev.mareana.com": "kubernetes-dashboard",
-    "mi-app-airflow.cloud.mareana.com": "mi-app",
-    "mi-r1-airflow.dev.mareana.com": "mi-r1-dev",
-    "mi-r1-spark.dev.mareana.com": "mi-r1-dev",
-    "mi-r1.dev.mareana.com": "mi-r1-dev",
-    "mi-spark.dev.mareana.com": "mi-app",
-    "mi.dev.mareana.com": "mi-app",
-    "prometheus.dev.mareana.com": "monitoring",
-    "vsm-bms.dev.mareana.com": "vsm-bms",
-    "vsm.dev.mareana.com": "vsm-dev",
-    "lab.dev.mareana.com": "lab-dev"
-}
-
-# NodeGroup Default Values - Authoritative Source
-NODEGROUP_DEFAULTS = {
-    "ai360.dev.mareana.com": {"nodegroup": "ai360-ondemand", "desired": 1, "min": 1, "max": 2},
-    "ebr.dev.mareana.com": {"nodegroup": "vsm-dev", "desired": 1, "min": 1, "max": 2},
-    "flux.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "grafana.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "k8s-dashboard.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "prometheus.dev.mareana.com": {"nodegroup": "flux", "desired": 1, "min": 1, "max": 2},
-    "gtag.dev.mareana.com": {"nodegroup": "gtag-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1-airflow.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1-spark.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-r1.dev.mareana.com": {"nodegroup": "mi-r1-dev", "desired": 1, "min": 1, "max": 2},
-    "mi-app-airflow.cloud.mareana.com": {"nodegroup": "mi-app-new", "desired": 2, "min": 1, "max": 2},
-    "mi-spark.dev.mareana.com": {"nodegroup": "mi-app-new", "desired": 1, "min": 1, "max": 2},
-    "mi.dev.mareana.com": {"nodegroup": "mi-app-new", "desired": 1, "min": 1, "max": 2},
-    "vsm-bms.dev.mareana.com": None,
-    "vsm.dev.mareana.com": {"nodegroup": "vsm-dev-ng", "desired": 1, "min": 1, "max": 2},
-    "lab.dev.mareana.com": {"nodegroup": "lab-dev", "desired": 1, "min": 1, "max": 2}
-}
-
 def get_namespace_for_app(app_name, discovered_namespace=None):
     """Get the correct namespace for an application using authoritative mapping."""
     if app_name in APP_NAMESPACE_MAPPING:
         return APP_NAMESPACE_MAPPING[app_name]
     return discovered_namespace or 'default'
 
-def get_nodegroup_defaults(app_name):
+def get_nodegroup_defaults_for_app(app_name):
     """Get NodeGroup defaults for an application from the authoritative mapping."""
     return NODEGROUP_DEFAULTS.get(app_name)
 
@@ -121,7 +108,7 @@ def get_bearer_token(cluster_name):
     return f"k8s-aws-v1.{base64.urlsafe_b64encode(signed_url.encode('utf-8')).decode('utf-8').rstrip('=')}"
 
 def load_k8s_config():
-    """Load Kubernetes configuration for EKS."""
+    """Load Kubernetes configuration for EKS with detailed error handling."""
     global k8s_client
     # Always refresh the token to ensure RBAC changes are picked up
     # Reset client to None to force re-initialization
@@ -131,47 +118,102 @@ def load_k8s_config():
         # Try in-cluster config first (if running in EKS)
         config.load_incluster_config()
         k8s_client = client
+        print(f"✅ Loaded in-cluster Kubernetes config")
         return
-    except:
+    except Exception as e:
+        print(f"ℹ️  In-cluster config not available: {str(e)}")
         pass
     
     try:
+        print(f"🔍 Loading EKS config for cluster: {EKS_CLUSTER_NAME}")
         # Get EKS cluster information
         import base64
         cluster_info = eks_client.describe_cluster(name=EKS_CLUSTER_NAME)
         cluster = cluster_info['cluster']
         
+        cluster_endpoint = cluster.get('endpoint')
+        if not cluster_endpoint:
+            raise Exception(f"Cluster {EKS_CLUSTER_NAME} has no endpoint")
+        
+        print(f"   Cluster endpoint: {cluster_endpoint}")
+        
         # Configure Kubernetes client
         configuration = client.Configuration()
-        configuration.host = cluster['endpoint']
+        configuration.host = cluster_endpoint
         configuration.verify_ssl = True
         configuration.ssl_ca_cert = None
         
         # Decode certificate
-        cert_data = base64.b64decode(cluster['certificateAuthority']['data'])
+        ca_data = cluster.get('certificateAuthority', {}).get('data')
+        if not ca_data:
+            raise Exception(f"Cluster {EKS_CLUSTER_NAME} has no certificate authority data")
+        
+        cert_data = base64.b64decode(ca_data)
+        print(f"   Certificate decoded: {len(cert_data)} bytes")
         
         # Write cert to temp file
         import tempfile
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file:
             cert_file.write(cert_data)
             configuration.ssl_ca_cert = cert_file.name
+            print(f"   Certificate written to: {cert_file.name}")
         
         # Get authentication token (always generate fresh token)
+        print(f"   Generating authentication token...")
         token = get_bearer_token(EKS_CLUSTER_NAME)
-        configuration.api_key = {"authorization": "Bearer " + token}
+        if not token:
+            raise Exception("Failed to generate authentication token")
         
-        # Create a new API client instance with fresh configuration
-        api_client = client.ApiClient(configuration)
-        k8s_client = client
+        configuration.api_key = {"authorization": "Bearer " + token}
+        print(f"   Token generated: {token[:20]}...")
+        
         # Set the default configuration
         client.Configuration.set_default(configuration)
-    except Exception as e:
+        k8s_client = client
+        
+        # Test the connection by listing namespaces (lightweight check)
+        try:
+            core_v1 = client.CoreV1Api()
+            # This will fail if auth is wrong, but we catch it
+            _ = core_v1.list_namespace(limit=1)
+            print(f"✅ Kubernetes client initialized and tested successfully")
+        except Exception as test_error:
+            error_str = str(test_error)
+            if '401' in error_str or '403' in error_str or 'Unauthorized' in error_str or 'Forbidden' in error_str:
+                print(f"⚠️  Kubernetes authentication test failed: {error_str}")
+                print(f"   This may indicate RBAC permission issues")
+                print(f"   Client initialized but may not have permissions")
+            else:
+                print(f"⚠️  Kubernetes connection test failed: {error_str}")
+                # Still set client - let individual calls handle errors
+        
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        error_msg = str(e)
+        print(f"❌ AWS EKS API error: {error_code} - {error_msg}")
+        if error_code == 'ResourceNotFoundException':
+            print(f"   Cluster {EKS_CLUSTER_NAME} not found")
+        elif error_code == 'UnauthorizedOperation':
+            print(f"   Missing eks:DescribeCluster permission")
         try:
             # Final fallback to kubeconfig (for local testing)
             config.load_kube_config()
             k8s_client = client
-        except:
-            print(f"⚠️  Could not load Kubernetes config: {str(e)}")
+            print(f"✅ Fallback: Loaded kubeconfig")
+        except Exception as fallback_error:
+            print(f"❌ Could not load kubeconfig fallback: {str(fallback_error)}")
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error loading Kubernetes config: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        try:
+            # Final fallback to kubeconfig (for local testing)
+            config.load_kube_config()
+            k8s_client = client
+            print(f"✅ Fallback: Loaded kubeconfig")
+        except Exception as fallback_error:
+            print(f"❌ Could not load kubeconfig fallback: {str(fallback_error)}")
 
 def find_ec2_instance_by_ip(ip_address):
     """
@@ -384,7 +426,7 @@ def check_nodegroup_state_live(nodegroup_name):
                 if isinstance(app_name, dict) and 'S' in app_name:
                     app_name = app_name['S']
                 # Check if this app's NodeGroup matches
-                nodegroup_defaults = get_nodegroup_defaults(app_name)
+                nodegroup_defaults = get_nodegroup_defaults_for_app(app_name)
                 if nodegroup_defaults and nodegroup_defaults.get('nodegroup') == nodegroup_name:
                     apps_using_ng.append(app_name)
             if len(apps_using_ng) > 1:
@@ -442,8 +484,11 @@ def check_pod_state_live(namespace):
         print(f"⚠️  Namespace is empty, skipping pod check")
         return {
             'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
-            'running_list': [], 'pending_list': [], 'crashloop_list': []
+            'running_list': [], 'pending_list': [], 'crashloop_list': [],
+            'error': 'Namespace is empty'
         }
+    
+    print(f"🔍 Starting pod check for namespace: {namespace}")
     
     # Always reload config to get fresh token with latest RBAC permissions
     global k8s_client
@@ -451,39 +496,76 @@ def check_pod_state_live(namespace):
     load_k8s_config()
     
     if k8s_client is None:
-        print(f"⚠️  Kubernetes client not available, skipping pod check for namespace {namespace}")
+        print(f"❌ Kubernetes client not available, skipping pod check for namespace {namespace}")
         return {
             'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
-            'running_list': [], 'pending_list': [], 'crashloop_list': []
+            'running_list': [], 'pending_list': [], 'crashloop_list': [],
+            'error': 'Kubernetes client not initialized',
+            'warning': 'Kubernetes client failed to initialize. Check EKS cluster access and IAM permissions.'
         }
     
     try:
         print(f"🔍 Checking pod state for namespace: {namespace}")
+        
+        # Verify k8s_client is properly initialized
+        if k8s_client is None:
+            raise Exception("Kubernetes client is None after initialization")
+        
         # Use the global k8s_client which was just loaded
-        core_v1 = k8s_client.CoreV1Api()
+        try:
+            core_v1 = k8s_client.CoreV1Api()
+            print(f"   ✅ CoreV1Api client created successfully")
+        except Exception as client_error:
+            print(f"   ❌ Failed to create CoreV1Api client: {str(client_error)}")
+            raise Exception(f"CoreV1Api initialization failed: {str(client_error)}")
         
         try:
+            print(f"   📡 Calling Kubernetes API: list_namespaced_pod(namespace='{namespace}')")
             pods = core_v1.list_namespaced_pod(namespace=namespace)
             print(f"✅ Successfully retrieved {len(pods.items)} pods from namespace {namespace}")
         except Exception as api_error:
-            # Handle 401 Unauthorized (RBAC permission issue)
+            # Handle RBAC permission issues (401 Unauthorized, 403 Forbidden)
             error_str = str(api_error)
             error_body = getattr(api_error, 'body', '')
-            error_status = getattr(api_error, 'status', '')
+            error_status = getattr(api_error, 'status', None)
             
-            if '401' in error_str or 'Unauthorized' in error_str or error_status == 401:
-                print(f"⚠️  Kubernetes RBAC: No permission to list pods in namespace {namespace} (401 Unauthorized)")
-                print(f"   Error details: {error_str}")
+            # Check for HTTP status codes
+            if hasattr(api_error, 'status'):
+                error_status = api_error.status
+            elif hasattr(api_error, 'reason'):
+                # Try to extract status from reason
+                if '401' in error_str or 'Unauthorized' in error_str:
+                    error_status = 401
+                elif '403' in error_str or 'Forbidden' in error_str:
+                    error_status = 403
+            
+            # Handle 401 Unauthorized or 403 Forbidden (RBAC permission issues)
+            if error_status in [401, 403] or '401' in error_str or '403' in error_str or 'Unauthorized' in error_str or 'Forbidden' in error_str:
+                print(f"⚠️  Kubernetes RBAC: No permission to list pods in namespace '{namespace}' (HTTP {error_status or '401/403'})")
+                print(f"   Error: {error_str}")
                 print(f"   Status: {error_status}")
+                print(f"   Body: {error_body[:200] if error_body else 'N/A'}")
                 print(f"   To fix: Ensure aws-auth ConfigMap maps IAM role to username 'eks-api-handler-lambda'")
                 print(f"   See: docs/POD_RBAC_SETUP.md for setup instructions")
                 return {
                     'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
-                    'running_list': [], 'pending_list': [], 'crashloop_list': []
+                    'running_list': [], 'pending_list': [], 'crashloop_list': [],
+                    'error': f'RBAC permission denied (HTTP {error_status or 401})',
+                    'warning': f'No permission to list pods in namespace {namespace}. See docs/POD_RBAC_SETUP.md'
                 }
-            # Re-raise other errors
-            print(f"❌ Error listing pods in {namespace}: {error_str}")
-            raise
+            
+            # Handle other API errors
+            print(f"❌ Error listing pods in namespace '{namespace}': {error_str}")
+            print(f"   Error type: {type(api_error).__name__}")
+            print(f"   Status: {error_status}")
+            import traceback
+            traceback.print_exc()
+            # Return empty pods instead of crashing
+            return {
+                'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+                'running_list': [], 'pending_list': [], 'crashloop_list': [],
+                'error': f'Kubernetes API error: {error_str[:100]}'
+            }
         
         running = 0
         pending = 0
@@ -698,15 +780,24 @@ def get_app_live_status(app_name):
     # Get metadata from DynamoDB (only for namespace, hostnames, DB hosts)
     metadata = get_app_metadata(app_name)
     if not metadata:
+        print(f"⚠️  No metadata found for app: {app_name}")
         return None
     
-    # Use authoritative namespace mapping
-    namespace = get_namespace_for_app(app_name, metadata.get('namespace'))
+    # Use authoritative namespace mapping (from config.yaml)
+    discovered_namespace = metadata.get('namespace')
+    namespace = get_namespace_for_app(app_name, discovered_namespace)
+    
+    # Log namespace determination for debugging
+    if discovered_namespace != namespace:
+        print(f"🔄 Namespace override for {app_name}: {discovered_namespace} → {namespace} (from config mapping)")
+    else:
+        print(f"✅ Using namespace for {app_name}: {namespace}")
+    
     hostnames = metadata['hostnames']
     primary_hostname = hostnames[0] if hostnames else None
     
     # Get NodeGroup name from defaults
-    nodegroup_defaults = get_nodegroup_defaults(app_name)
+    nodegroup_defaults = get_nodegroup_defaults_for_app(app_name)
     nodegroup_name = nodegroup_defaults['nodegroup'] if nodegroup_defaults else None
     
     # Perform all checks in parallel
@@ -717,11 +808,48 @@ def get_app_live_status(app_name):
         http_future = executor.submit(check_http_status_live, primary_hostname)
         pods_future = executor.submit(check_pod_state_live, namespace)
         
-        # Get results
-        postgres_result = db_postgres_future.result()
-        neo4j_result = db_neo4j_future.result()
-        http_status, http_code, http_latency_ms = http_future.result()
-        pods = pods_future.result()
+        # Get results (with timeout handling)
+        try:
+            postgres_result = db_postgres_future.result(timeout=30)
+        except Exception as e:
+            print(f"⚠️  Error getting postgres result: {str(e)}")
+            postgres_result = {'state': 'stopped', 'instance_id': None, 'is_shared': False, 'shared_with': []}
+        
+        try:
+            neo4j_result = db_neo4j_future.result(timeout=30)
+        except Exception as e:
+            print(f"⚠️  Error getting neo4j result: {str(e)}")
+            neo4j_result = {'state': 'stopped', 'instance_id': None, 'is_shared': False, 'shared_with': []}
+        
+        try:
+            http_status, http_code, http_latency_ms = http_future.result(timeout=10)
+        except Exception as e:
+            print(f"⚠️  Error getting HTTP result: {str(e)}")
+            http_status, http_code, http_latency_ms = 'DOWN', 0, None
+        
+        try:
+            pods = pods_future.result(timeout=30)
+            # Ensure pods dict has all required fields
+            if not isinstance(pods, dict):
+                pods = {'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0, 'running_list': [], 'pending_list': [], 'crashloop_list': []}
+            # Ensure all fields exist
+            pods.setdefault('running', 0)
+            pods.setdefault('pending', 0)
+            pods.setdefault('crashloop', 0)
+            pods.setdefault('total', 0)
+            pods.setdefault('running_list', [])
+            pods.setdefault('pending_list', [])
+            pods.setdefault('crashloop_list', [])
+            print(f"✅ Pod data for {app_name}: running={pods.get('running')}, pending={pods.get('pending')}, crashloop={pods.get('crashloop')}, total={pods.get('total')}")
+        except Exception as e:
+            print(f"⚠️  Error getting pods result for {app_name}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            pods = {
+                'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+                'running_list': [], 'pending_list': [], 'crashloop_list': [],
+                'error': f'Pod check failed: {str(e)[:100]}'
+            }
     
     # Get NodeGroup state (separate call, can't be parallelized easily with others)
     nodegroups = []
@@ -796,12 +924,34 @@ def get_all_apps_live():
             for future in as_completed(futures):
                 app_name = futures[future]
                 try:
-                    result = future.result()
+                    result = future.result(timeout=60)  # 60 second timeout per app
                     if result:
+                        # Ensure pods data is always present
+                        if 'pods' not in result or not result['pods']:
+                            print(f"⚠️  Missing pods data for {app_name}, adding default")
+                            result['pods'] = {
+                                'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+                                'running_list': [], 'pending_list': [], 'crashloop_list': []
+                            }
                         results.append(result)
                 except Exception as e:
-                    print(f"Error getting live status for {app_name}: {str(e)}")
+                    print(f"❌ Error getting live status for {app_name}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Still add app with default pods data so UI doesn't break
+                    results.append({
+                        'app': app_name,
+                        'name': app_name,
+                        'hostname': app_name,
+                        'status': 'DOWN',
+                        'pods': {
+                            'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+                            'running_list': [], 'pending_list': [], 'crashloop_list': [],
+                            'error': f'Status check failed: {str(e)[:100]}'
+                        }
+                    })
         
+        print(f"✅ Returning {len(results)} apps with pod data")
         return results
     except Exception as e:
         print(f"Error getting all apps: {str(e)}")
@@ -854,6 +1004,57 @@ def lambda_handler(event, context):
                     },
                     'body': json.dumps({'error': f'Application {app_name} not found'}, default=str)
                 }
+        
+        # Handle GET /status/{app_name} - quick status check (UP/DOWN only)
+        elif http_method == 'GET' and '/status/' in path and path_params.get('app_name'):
+            app_name = path_params['app_name']
+            metadata = get_app_metadata(app_name)
+            
+            if not metadata:
+                return {
+                    'statusCode': 404,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': f'Application {app_name} not found'}, default=str)
+                }
+            
+            # Perform quick HTTP check
+            hostnames = metadata.get('hostnames', [])
+            primary_hostname = hostnames[0] if hostnames else None
+            
+            if not primary_hostname:
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'app_name': app_name, 'status': 'DOWN', 'reason': 'No hostname'}, default=str)
+                }
+            
+            # Quick HTTP check
+            urls_to_try = [f"https://{primary_hostname}", f"http://{primary_hostname}"]
+            status = 'DOWN'
+            
+            for url in urls_to_try:
+                try:
+                    response = requests.head(url, timeout=5, verify=False, allow_redirects=True)
+                    if response.status_code == 200:
+                        status = 'UP'
+                        break
+                except:
+                    continue
+            
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({'app_name': app_name, 'status': status}, default=str)
+            }
         
         # Handle OPTIONS for CORS
         elif http_method == 'OPTIONS':
