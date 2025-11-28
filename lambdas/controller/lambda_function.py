@@ -9,6 +9,8 @@ import time
 import boto3
 import requests
 import socket
+import uuid
+import random
 from botocore.exceptions import ClientError
 from kubernetes import client, config
 from urllib.parse import urlparse
@@ -374,6 +376,160 @@ def check_database_health(host, port, db_type='postgres'):
     except Exception as e:
         print(f"      ❌ {db_type.upper()} {host}:{port} check failed: {str(e)}")
         return False
+
+# ============================================================================
+# DISTRIBUTED LOCK FUNCTIONS FOR DATABASE STOP OPERATIONS
+# ============================================================================
+
+def acquire_db_lock(db_identifier, owner_id, ttl_seconds=60, max_retries=3):
+    """
+    Acquire a distributed lock for a database resource in DynamoDB.
+    
+    Args:
+        db_identifier: Unique identifier for the database (EC2 instance ID or host:port)
+        owner_id: Unique request ID (UUID) for this lock owner
+        ttl_seconds: Time-to-live for the lock (default 60 seconds)
+        max_retries: Maximum number of retry attempts with jitter
+    
+    Returns:
+        (success: bool, lock_key: str) - True if lock acquired, False otherwise
+    """
+    lock_key = f"LOCK#DB#{db_identifier}"
+    table = dynamodb.Table(TABLE_NAME)
+    current_time = int(time.time())
+    ttl = current_time + ttl_seconds
+    
+    for attempt in range(max_retries):
+        try:
+            # Try to acquire lock with conditional write
+            # Condition: lock doesn't exist OR lock has expired (ttl < now)
+            table.put_item(
+                Item={
+                    'app_name': lock_key,  # Using app_name as PK for single-table design
+                    'owner_id': owner_id,
+                    'ttl': ttl,
+                    'created_at': current_time,
+                    'lock_type': 'database',
+                    'db_identifier': db_identifier
+                },
+                ConditionExpression='attribute_not_exists(app_name) OR ttl < :now',
+                ExpressionAttributeValues={
+                    ':now': current_time
+                }
+            )
+            print(f"   🔒 Lock acquired for db={db_identifier}, owner={owner_id[:8]}...")
+            return True, lock_key
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code == 'ConditionalCheckFailedException':
+                # Lock is held by another process
+                if attempt < max_retries - 1:
+                    # Exponential backoff with jitter
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    print(f"   ⏳ Lock held by another process, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ Lock not acquired for db={db_identifier} after {max_retries} attempts")
+                    return False, lock_key
+            else:
+                print(f"   ⚠️  Error acquiring lock: {error_code} - {str(e)}")
+                return False, lock_key
+        except Exception as e:
+            print(f"   ⚠️  Unexpected error acquiring lock: {str(e)}")
+            return False, lock_key
+    
+    return False, lock_key
+
+def release_db_lock(lock_key, owner_id):
+    """
+    Release a distributed lock if owned by this process.
+    
+    Args:
+        lock_key: The lock key (LOCK#DB#<db_identifier>)
+        owner_id: The owner ID that acquired the lock
+    
+    Returns:
+        bool - True if lock released, False otherwise
+    """
+    table = dynamodb.Table(TABLE_NAME)
+    
+    try:
+        # Only delete if owner_id matches (avoid releasing someone else's lock)
+        table.delete_item(
+            Key={'app_name': lock_key},
+            ConditionExpression='owner_id = :owner_id',
+            ExpressionAttributeValues={
+                ':owner_id': owner_id
+            }
+        )
+        print(f"   🔓 Lock released for {lock_key}, owner={owner_id[:8]}...")
+        return True
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', '')
+        if error_code == 'ConditionalCheckFailedException':
+            # Lock was not owned by this process (or already released)
+            print(f"   ⚠️  Lock {lock_key} not owned by {owner_id[:8]}... (may have been released or expired)")
+            return False
+        else:
+            print(f"   ⚠️  Error releasing lock: {error_code} - {str(e)}")
+            return False
+    except Exception as e:
+        print(f"   ⚠️  Unexpected error releasing lock: {str(e)}")
+        return False
+
+def check_app_quick_status(app_name, api_base_url=None, timeout=3):
+    """
+    Check application status using the API Handler quick-status endpoint.
+    
+    Args:
+        app_name: Application name or hostname
+        api_base_url: Base URL for API Gateway (optional, will try to get from config)
+        timeout: Request timeout in seconds (default 3)
+    
+    Returns:
+        str - "UP", "DOWN", or "UNKNOWN"
+    """
+    try:
+        # Get API Gateway URL from config or environment
+        if not api_base_url:
+            try:
+                api_gateway_stage = CONFIG.get('api_gateway', {}).get('stage_name', 'prod')
+                region = CONFIG.get('aws', {}).get('region', 'us-east-1')
+                # Try to get API Gateway URL from environment or construct it
+                # For now, we'll need to get it from the API Gateway or pass it via config
+                api_base_url = os.environ.get('API_GATEWAY_URL')
+                if not api_base_url:
+                    # Fallback: try to construct from known pattern
+                    # This should be set in config.yaml or environment
+                    print(f"   ⚠️  API Gateway URL not configured, using fallback")
+                    return "UNKNOWN"
+            except Exception as e:
+                print(f"   ⚠️  Could not get API Gateway URL: {str(e)}")
+                return "UNKNOWN"
+        
+        # Call quick-status endpoint
+        url = f"{api_base_url}/status/quick"
+        params = {'app': app_name}
+        
+        response = requests.get(url, params=params, timeout=timeout)
+        
+        if response.status_code == 200:
+            data = response.json()
+            status = data.get('status', 'UNKNOWN')
+            print(f"   📡 Quick status for {app_name}: {status}")
+            return status
+        else:
+            print(f"   ⚠️  Quick status endpoint returned {response.status_code}")
+            return "UNKNOWN"
+    except requests.exceptions.Timeout:
+        print(f"   ⏱️  Quick status check timeout for {app_name}")
+        return "UNKNOWN"
+    except requests.exceptions.RequestException as e:
+        print(f"   ⚠️  Error calling quick-status for {app_name}: {str(e)}")
+        return "UNKNOWN"
+    except Exception as e:
+        print(f"   ⚠️  Unexpected error in quick-status check: {str(e)}")
+        return "UNKNOWN"
 
 def get_sharing_applications(resource_host, resource_type, current_app_name):
     """
@@ -1569,6 +1725,157 @@ def wait_for_pods_terminated(namespace, timeout=300):
     print(f"   ⚠️  Timeout waiting for pods to terminate (waited {timeout}s)")
     return False
 
+def stop_database_with_lock(db_host, db_type, app_name, results, api_base_url=None):
+    """
+    Stop a database instance with distributed lock and shared-app checks.
+    
+    Args:
+        db_host: Database host IP address
+        db_type: 'postgres' or 'neo4j'
+        app_name: Application being stopped
+        results: Results dictionary to update
+        api_base_url: API Gateway base URL for quick-status checks
+    
+    Returns:
+        dict with action result: {'action': 'stopped'|'skipped_shared_active'|'skipped_lock'|'error', ...}
+    """
+    if not db_host:
+        return {'action': 'skipped', 'reason': 'No database host'}
+    
+    # Generate unique owner ID for this lock
+    owner_id = str(uuid.uuid4())
+    
+    # Find EC2 instance ID (prefer instance ID as db_identifier)
+    db_identifier = None
+    instance_id = None
+    
+    try:
+        filters = [
+            {'Name': 'private-ip-address', 'Values': [db_host]},
+            {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
+        ]
+        response = ec2.describe_instances(Filters=filters)
+        for reservation in response.get('Reservations', []):
+            for instance in reservation.get('Instances', []):
+                instance_id = instance['InstanceId']
+                db_identifier = instance_id  # Prefer instance ID
+                break
+        if not db_identifier:
+            # Fallback to host:port if instance not found
+            db_identifier = f"{db_host}:5432" if db_type == 'postgres' else f"{db_host}:7687"
+    except Exception as e:
+        print(f"   ⚠️  Error finding EC2 instance for {db_host}: {str(e)}")
+        db_identifier = f"{db_host}:5432" if db_type == 'postgres' else f"{db_host}:7687"
+    
+    print(f"\n   🔍 Processing {db_type.upper()} database: {db_host} (identifier: {db_identifier})")
+    
+    # Check if database is shared
+    is_shared = is_database_shared(get_app_from_registry(app_name), db_type)
+    
+    if not is_shared:
+        # Dedicated database - stop immediately without lock
+        print(f"   ℹ️  {db_type.upper()} is DEDICATED - stopping EC2 instance...")
+        try:
+            if instance_id:
+                stop_ec2_instance(instance_id)
+                return {
+                    'action': 'stopped',
+                    'host': db_host,
+                    'instance_id': instance_id,
+                    'shared': False
+                }
+            else:
+                return {'action': 'error', 'reason': 'EC2 instance not found'}
+        except Exception as e:
+            return {'action': 'error', 'reason': str(e)}
+    
+    # Shared database - use lock mechanism
+    print(f"   ℹ️  {db_type.upper()} is SHARED - acquiring lock and checking sharing apps...")
+    
+    # Acquire lock
+    lock_acquired, lock_key = acquire_db_lock(db_identifier, owner_id, ttl_seconds=60, max_retries=3)
+    
+    if not lock_acquired:
+        print(f"   ⚠️  Lock not acquired for db={db_identifier}. Skipping DB stop (fail-safe).")
+        return {
+            'action': 'skipped_lock',
+            'host': db_host,
+            'db_identifier': db_identifier,
+            'reason': 'Could not acquire distributed lock'
+        }
+    
+    try:
+        # Get all sharing applications
+        sharing_apps = get_sharing_applications(db_host, db_type, app_name)
+        
+        if not sharing_apps:
+            # No other apps share this database - safe to stop
+            print(f"   ✅ No other applications share this {db_type.upper()} database - stopping...")
+            if instance_id:
+                stop_ec2_instance(instance_id)
+                return {
+                    'action': 'stopped',
+                    'host': db_host,
+                    'instance_id': instance_id,
+                    'shared': True,
+                    'sharing_apps': [],
+                    'active_apps_detected': []
+                }
+            else:
+                return {'action': 'error', 'reason': 'EC2 instance not found'}
+        
+        print(f"   🔍 {db_type.upper()} shared with {len(sharing_apps)} application(s): {', '.join(sharing_apps)}")
+        
+        # Check status of each sharing app using quick-status endpoint
+        active_apps = []
+        unknown_apps = []
+        
+        for sharing_app in sharing_apps:
+            status = check_app_quick_status(sharing_app, api_base_url=api_base_url, timeout=3)
+            
+            if status == "UP":
+                active_apps.append(sharing_app)
+                print(f"   ⚠️  {sharing_app} is UP")
+            elif status == "UNKNOWN":
+                # Fail-safe: treat UNKNOWN as UP
+                unknown_apps.append(sharing_app)
+                print(f"   ⚠️  {sharing_app} status is UNKNOWN (treating as UP for safety)")
+            else:
+                print(f"   ✅ {sharing_app} is DOWN")
+        
+        # If any app is UP or UNKNOWN, do not stop database
+        if active_apps or unknown_apps:
+            all_blocking = active_apps + unknown_apps
+            print(f"   ⚠️  {db_type.upper()} {db_host} shared with active/unknown apps: {', '.join(all_blocking)}. Skipping stop.")
+            return {
+                'action': 'skipped_shared_active',
+                'host': db_host,
+                'instance_id': instance_id,
+                'shared': True,
+                'sharing_apps': sharing_apps,
+                'active_apps_detected': all_blocking,
+                'reason': f'Shared with active applications: {", ".join(all_blocking)}'
+            }
+        
+        # All sharing apps are DOWN - safe to stop
+        print(f"   ✅ All sharing applications are DOWN - stopping {db_type.upper()} database...")
+        if instance_id:
+            stop_ec2_instance(instance_id)
+            return {
+                'action': 'stopped',
+                'host': db_host,
+                'instance_id': instance_id,
+                'shared': True,
+                'sharing_apps': sharing_apps,
+                'active_apps_detected': []
+            }
+        else:
+            return {'action': 'error', 'reason': 'EC2 instance not found'}
+    
+    finally:
+        # Always release lock
+        release_db_lock(lock_key, owner_id)
+
 def stop_application(app_name):
     """
     STOP APPLICATION workflow - GRACEFUL SHUTDOWN:
@@ -1697,165 +2004,80 @@ def stop_application(app_name):
     except Exception as e:
         print(f"⚠️  Failed to update nodegroup_state: {str(e)}")
     
-    # STEP 4: Stop PostgreSQL instances (handle shared vs dedicated)
+    # STEP 4: Stop PostgreSQL instances (with distributed lock and shared-app checks)
     print("\n" + "="*70)
     print("STEP 4: STOPPING POSTGRESQL INSTANCES")
     print("="*70)
     
     postgres_host = app_data.get('postgres_host')
-    postgres_shared = is_database_shared(app_data, 'postgres')
     
-    stopped_pg_count = 0
-    if postgres_host:
-        if postgres_shared:
-            print(f"   ℹ️  PostgreSQL {postgres_host} is SHARED - checking if other apps are UP...")
-            # Special case: Stop shared DB only if ALL other apps using it are DOWN
-            if is_shared_resource_in_use(postgres_host, 'postgres', app_name):
-                print(f"   ⚠️  Shared PostgreSQL {postgres_host} is in use by active applications - SKIPPING STOP")
-                results['warnings'].append(f"PostgreSQL {postgres_host} is shared with active applications - database NOT stopped")
-            else:
-                print(f"   🔄 Shared PostgreSQL {postgres_host} is NOT in use - stopping EC2 instance...")
-                # Find EC2 instance by private IP
-                try:
-                    filters = [
-                        {'Name': 'private-ip-address', 'Values': [postgres_host]},
-                        {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
-                    ]
-                    response = ec2.describe_instances(Filters=filters)
-                    for reservation in response.get('Reservations', []):
-                        for instance in reservation.get('Instances', []):
-                            instance_id = instance['InstanceId']
-                            try:
-                                stop_ec2_instance(instance_id)
-                                results['postgres'].append({
-                                    'host': postgres_host,
-                                    'status': 'stopping',
-                                    'shared': True,
-                                    'reason': 'No other apps using shared resource'
-                                })
-                                stopped_pg_count += 1
-                                print(f"   ✅ Stopped unused shared PostgreSQL instance")
-                            except Exception as e:
-                                results['errors'].append(f"Failed to stop postgres {postgres_host}: {str(e)}")
-                except Exception as e:
-                    results['errors'].append(f"Failed to find postgres instance for {postgres_host}: {str(e)}")
-        else:
-            print(f"   🔄 PostgreSQL is DEDICATED - stopping EC2 instance...")
-            # Find EC2 instance by private IP
-            try:
-                filters = [
-                    {'Name': 'private-ip-address', 'Values': [postgres_host]},
-                    {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
-                ]
-                response = ec2.describe_instances(Filters=filters)
-                for reservation in response.get('Reservations', []):
-                    for instance in reservation.get('Instances', []):
-                        instance_id = instance['InstanceId']
-                        try:
-                            stop_ec2_instance(instance_id)
-                            results['postgres'].append({
-                                'host': postgres_host,
-                                'status': 'stopping',
-                                'shared': False
-                            })
-                            stopped_pg_count += 1
-                            print(f"   ✅ Stopped dedicated PostgreSQL instance")
-                        except Exception as e:
-                            results['errors'].append(f"Failed to stop postgres {postgres_host}: {str(e)}")
-            except Exception as e:
-                results['errors'].append(f"Failed to find postgres instance for {postgres_host}: {str(e)}")
-    
-    # Update postgres_state to "stopped" if any were stopped
-    if stopped_pg_count > 0:
+    # Get API Gateway URL for quick-status checks
+    api_base_url = os.environ.get('API_GATEWAY_URL')
+    if not api_base_url:
         try:
-            table = dynamodb.Table(TABLE_NAME)
-            table.update_item(
-                Key={'app_name': app_name},
-                UpdateExpression='SET postgres_state = :state',
-                ExpressionAttributeValues={':state': 'stopped'}
-            )
-        except Exception as e:
-            print(f"⚠️  Failed to update postgres_state: {str(e)}")
+            # Try to get from config
+            api_gateway_stage = CONFIG.get('api_gateway', {}).get('stage_name', 'prod')
+            region = CONFIG.get('aws', {}).get('region', 'us-east-1')
+            # Note: API Gateway URL should be set in environment or config
+            # For now, we'll use a placeholder that needs to be configured
+            print(f"   ⚠️  API Gateway URL not configured - quick-status checks may fail")
+        except:
+            pass
     
-    # STEP 5: Stop Neo4j instances (handle shared vs dedicated)
+    if postgres_host:
+        pg_result = stop_database_with_lock(postgres_host, 'postgres', app_name, results, api_base_url)
+        results['postgres'].append(pg_result)
+        
+        # Update warnings/errors based on result
+        if pg_result.get('action') == 'skipped_shared_active':
+            active_apps = pg_result.get('active_apps_detected', [])
+            results['warnings'].append(f"PostgreSQL {postgres_host} is shared with active applications: {', '.join(active_apps)} - database NOT stopped")
+        elif pg_result.get('action') == 'skipped_lock':
+            results['warnings'].append(f"PostgreSQL {postgres_host} - could not acquire lock, skipping stop (fail-safe)")
+        elif pg_result.get('action') == 'error':
+            results['errors'].append(f"Failed to stop PostgreSQL {postgres_host}: {pg_result.get('reason', 'Unknown error')}")
+        elif pg_result.get('action') == 'stopped':
+            # Update postgres_state to "stopped"
+            try:
+                table = dynamodb.Table(TABLE_NAME)
+                table.update_item(
+                    Key={'app_name': app_name},
+                    UpdateExpression='SET postgres_state = :state',
+                    ExpressionAttributeValues={':state': 'stopped'}
+                )
+            except Exception as e:
+                print(f"⚠️  Failed to update postgres_state: {str(e)}")
+    
+    # STEP 5: Stop Neo4j instances (with distributed lock and shared-app checks)
     print("\n" + "="*70)
     print("STEP 5: STOPPING NEO4J INSTANCES")
     print("="*70)
     
     neo4j_host = app_data.get('neo4j_host')
-    neo4j_shared = is_database_shared(app_data, 'neo4j')
     
-    stopped_neo4j_count = 0
     if neo4j_host:
-        if neo4j_shared:
-            print(f"   ℹ️  Neo4j {neo4j_host} is SHARED - checking if other apps are UP...")
-            # Special case: Stop shared DB only if ALL other apps using it are DOWN
-            if is_shared_resource_in_use(neo4j_host, 'neo4j', app_name):
-                print(f"   ⚠️  Shared Neo4j {neo4j_host} is in use by active applications - SKIPPING STOP")
-                results['warnings'].append(f"Neo4j {neo4j_host} is shared with active applications - database NOT stopped")
-            else:
-                print(f"   🔄 Shared Neo4j {neo4j_host} is NOT in use - stopping EC2 instance...")
-                # Find EC2 instance by private IP
-                try:
-                    filters = [
-                        {'Name': 'private-ip-address', 'Values': [neo4j_host]},
-                        {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
-                    ]
-                    response = ec2.describe_instances(Filters=filters)
-                    for reservation in response.get('Reservations', []):
-                        for instance in reservation.get('Instances', []):
-                            instance_id = instance['InstanceId']
-                            try:
-                                stop_ec2_instance(instance_id)
-                                results['neo4j'].append({
-                                    'host': neo4j_host,
-                                    'status': 'stopping',
-                                    'shared': True,
-                                    'reason': 'No other apps using shared resource'
-                                })
-                                stopped_neo4j_count += 1
-                                print(f"   ✅ Stopped unused shared Neo4j instance")
-                            except Exception as e:
-                                results['errors'].append(f"Failed to stop neo4j {neo4j_host}: {str(e)}")
-                except Exception as e:
-                    results['errors'].append(f"Failed to find neo4j instance for {neo4j_host}: {str(e)}")
-        else:
-            print(f"   🔄 Neo4j is DEDICATED - stopping EC2 instance...")
-            # Find EC2 instance by private IP
+        neo4j_result = stop_database_with_lock(neo4j_host, 'neo4j', app_name, results, api_base_url)
+        results['neo4j'].append(neo4j_result)
+        
+        # Update warnings/errors based on result
+        if neo4j_result.get('action') == 'skipped_shared_active':
+            active_apps = neo4j_result.get('active_apps_detected', [])
+            results['warnings'].append(f"Neo4j {neo4j_host} is shared with active applications: {', '.join(active_apps)} - database NOT stopped")
+        elif neo4j_result.get('action') == 'skipped_lock':
+            results['warnings'].append(f"Neo4j {neo4j_host} - could not acquire lock, skipping stop (fail-safe)")
+        elif neo4j_result.get('action') == 'error':
+            results['errors'].append(f"Failed to stop Neo4j {neo4j_host}: {neo4j_result.get('reason', 'Unknown error')}")
+        elif neo4j_result.get('action') == 'stopped':
+            # Update neo4j_state to "stopped"
             try:
-                filters = [
-                    {'Name': 'private-ip-address', 'Values': [neo4j_host]},
-                    {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
-                ]
-                response = ec2.describe_instances(Filters=filters)
-                for reservation in response.get('Reservations', []):
-                    for instance in reservation.get('Instances', []):
-                        instance_id = instance['InstanceId']
-                        try:
-                            stop_ec2_instance(instance_id)
-                            results['neo4j'].append({
-                                'host': neo4j_host,
-                                'status': 'stopping',
-                                'shared': False
-                            })
-                            stopped_neo4j_count += 1
-                            print(f"   ✅ Stopped dedicated Neo4j instance")
-                        except Exception as e:
-                            results['errors'].append(f"Failed to stop neo4j {neo4j_host}: {str(e)}")
+                table = dynamodb.Table(TABLE_NAME)
+                table.update_item(
+                    Key={'app_name': app_name},
+                    UpdateExpression='SET neo4j_state = :state',
+                    ExpressionAttributeValues={':state': 'stopped'}
+                )
             except Exception as e:
-                results['errors'].append(f"Failed to find neo4j instance for {neo4j_host}: {str(e)}")
-    
-    # Update neo4j_state to "stopped" if any were stopped
-    if stopped_neo4j_count > 0:
-        try:
-            table = dynamodb.Table(TABLE_NAME)
-            table.update_item(
-                Key={'app_name': app_name},
-                UpdateExpression='SET neo4j_state = :state',
-                ExpressionAttributeValues={':state': 'stopped'}
-            )
-        except Exception as e:
-            print(f"⚠️  Failed to update neo4j_state: {str(e)}")
+                print(f"⚠️  Failed to update neo4j_state: {str(e)}")
     
     # Update registry status
     try:

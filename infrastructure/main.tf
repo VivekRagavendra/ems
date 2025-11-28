@@ -25,7 +25,8 @@ variable "lambda_runtime" {
   default     = "python3.11"
 }
 
-# DynamoDB Table
+# DynamoDB Table for App Registry and Resource Locks
+# Uses single table design: app_name for apps, LOCK#DB#<id> for locks
 resource "aws_dynamodb_table" "app_registry" {
   name         = "${var.project_name}-registry"
   billing_mode = "PAY_PER_REQUEST"
@@ -34,6 +35,12 @@ resource "aws_dynamodb_table" "app_registry" {
   attribute {
     name = "app_name"
     type = "S"
+  }
+
+  # Enable TTL for automatic lock expiration
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
   }
 
   tags = {
@@ -145,7 +152,10 @@ resource "aws_iam_role_policy" "controller_lambda_policy" {
         Effect = "Allow"
         Action = [
           "dynamodb:GetItem",
-          "dynamodb:UpdateItem"
+          "dynamodb:UpdateItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan"
         ]
         Resource = aws_dynamodb_table.app_registry.arn
       },

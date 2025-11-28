@@ -1037,10 +1037,12 @@ def lambda_handler(event, context):
             # Quick HTTP check
             urls_to_try = [f"https://{primary_hostname}", f"http://{primary_hostname}"]
             status = 'DOWN'
+            http_code = None
             
             for url in urls_to_try:
                 try:
                     response = requests.head(url, timeout=5, verify=False, allow_redirects=True)
+                    http_code = response.status_code
                     if response.status_code == 200:
                         status = 'UP'
                         break
@@ -1054,6 +1056,96 @@ def lambda_handler(event, context):
                     'Access-Control-Allow-Origin': '*'
                 },
                 'body': json.dumps({'app_name': app_name, 'status': status}, default=str)
+            }
+        
+        # Handle GET /status/quick?app=<app_name> - lightweight quick status endpoint for Controller
+        elif http_method == 'GET' and '/status/quick' in path:
+            query_params = event.get('queryStringParameters') or {}
+            app_name = query_params.get('app')
+            
+            if not app_name:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Missing app parameter'}, default=str)
+                }
+            
+            metadata = get_app_metadata(app_name)
+            
+            if not metadata:
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'app': app_name,
+                        'status': 'UNKNOWN',
+                        'http_code': None,
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        'reason': 'Application not found in registry'
+                    }, default=str)
+                }
+            
+            # Perform quick HTTP check with 3s timeout
+            hostnames = metadata.get('hostnames', [])
+            primary_hostname = hostnames[0] if hostnames else None
+            
+            if not primary_hostname:
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'app': app_name,
+                        'status': 'UNKNOWN',
+                        'http_code': None,
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        'reason': 'No hostname configured'
+                    }, default=str)
+                }
+            
+            # Quick HTTP check with 3s timeout
+            urls_to_try = [f"https://{primary_hostname}", f"http://{primary_hostname}"]
+            status = 'UNKNOWN'
+            http_code = None
+            
+            for url in urls_to_try:
+                try:
+                    response = requests.head(url, timeout=3, verify=False, allow_redirects=True)
+                    http_code = response.status_code
+                    if response.status_code == 200:
+                        status = 'UP'
+                        break
+                    else:
+                        status = 'DOWN'
+                except requests.exceptions.Timeout:
+                    status = 'UNKNOWN'
+                    break
+                except (requests.exceptions.ConnectionError, requests.exceptions.RequestException):
+                    continue
+                except Exception:
+                    status = 'UNKNOWN'
+                    break
+            
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'app': app_name,
+                    'status': status,
+                    'http_code': http_code,
+                    'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                }, default=str)
             }
         
         # Handle OPTIONS for CORS

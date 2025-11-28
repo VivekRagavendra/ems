@@ -102,6 +102,24 @@ resource "aws_apigatewayv2_route" "options_stop" {
   target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
 }
 
+# API Gateway Route for GET /status/quick (quick-status endpoint for Controller)
+# This endpoint is used internally by Controller Lambda to check app status
+# Note: This can be public or use API key - for simplicity, we'll allow internal access
+resource "aws_apigatewayv2_route" "get_status_quick" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /status/quick"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  
+  # Optional: Add API key requirement for security
+  # For now, allow access (can be restricted later with API keys)
+}
+
+resource "aws_apigatewayv2_route" "options_status_quick" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /status/quick"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+}
+
 # API Gateway Stage
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.main.id

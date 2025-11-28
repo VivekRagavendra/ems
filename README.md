@@ -47,7 +47,10 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 - ✅ **Shared Resource Detection & Protection**: 
   - Automatically detects when databases or NodeGroups are shared across multiple applications
   - Shows "🔗 Shared Resource" badge with list of sharing applications
-  - Prevents stopping databases shared by multiple applications
+  - **Distributed Lock Mechanism**: Prevents race conditions when stopping shared databases
+  - **Intelligent Stop Logic**: Databases only stopped when ALL dependent applications are DOWN
+  - **Live Status Checks**: Uses quick-status endpoint to verify sharing apps are actually DOWN
+  - **Fail-Safe Design**: UNKNOWN status treated as UP (prevents accidental DB stops)
   - Visual warnings in dashboard for shared resources
 - ✅ **Real-Time Live Status Monitoring**: 
   - **NO CACHING** - All status checks are performed live on every API request
@@ -118,8 +121,8 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 
 **Components:**
 - **4 Lambda Functions**: Discovery, Controller, Health Monitor, API Handler
-- **DynamoDB Table**: Central registry for application metadata (NOT used for status caching)
-- **API Gateway**: HTTP API for dashboard and automation
+- **DynamoDB Table**: Central registry for application metadata + distributed locks (TTL-enabled)
+- **API Gateway**: HTTP API for dashboard and automation (includes quick-status endpoint)
 - **EventBridge**: Scheduled triggers for discovery and health checks
 - **React Dashboard**: Lightweight web UI with real-time live status updates
 
@@ -131,6 +134,11 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
   - EKS API calls for NodeGroup state
   - Kubernetes API calls for pod counts
   - HTTP HEAD requests for application status
+  - Quick-status endpoint (`/status/quick`) for Controller Lambda shared-app checks
+- **Controller Lambda**: Start/stop operations with distributed locking
+  - Acquires DynamoDB locks before database stop operations
+  - Checks sharing app status via quick-status endpoint
+  - Prevents race conditions in concurrent stop scenarios
 - **Dashboard**: Auto-refreshes every 5 seconds, fetches fresh data from API Handler
 
 ## 🚀 Quick Start
@@ -302,6 +310,11 @@ Quick 297-line reference for the 2.5-day implementation:
 | [docs/management/IMPLEMENTATION_TIMELINE_SUMMARY.md](docs/management/IMPLEMENTATION_TIMELINE_SUMMARY.md) | **2.5-day implementation quick reference** |
 | [docs/management/PROJECT_SUMMARY.md](docs/management/PROJECT_SUMMARY.md) | **Complete project overview & achievements** |
 
+**Implementation Guides:**
+| [SHARED_DB_LOCK_IMPLEMENTATION.md](SHARED_DB_LOCK_IMPLEMENTATION.md) | **Distributed locking for shared database protection** |
+| [SHARED_DATABASE_PROTECTION.md](SHARED_DATABASE_PROTECTION.md) | **Shared database protection with live HTTP checks** |
+| [POD_STATUS_FIX.md](POD_STATUS_FIX.md) | **Pod status display fixes and RBAC setup** |
+
 **User Guides:**
 | [docs/guides/TEST_GUIDE.md](docs/guides/TEST_GUIDE.md) | How to test and use the system |
 | [docs/guides/TEST_ALL_APPLICATIONS.md](docs/guides/TEST_ALL_APPLICATIONS.md) | **Test all apps one-by-one (9 checks each)** |
@@ -453,7 +466,10 @@ See [COST_FAQ.md](COST_FAQ.md) for quick answers, [COST_SUMMARY.md](COST_SUMMARY
 ## 🔐 Security Considerations
 
 - **IAM Roles**: Least-privilege permissions for all Lambda functions
-  - Controller Lambda: Only `ec2:StartInstances`, `ec2:StopInstances`, `ec2:DescribeInstances` (minimum required)
+  - Controller Lambda: 
+    - `ec2:StartInstances`, `ec2:StopInstances`, `ec2:DescribeInstances` (minimum required)
+    - `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:Scan` (for distributed locks)
+    - `dynamodb:GetItem`, `dynamodb:UpdateItem` (for registry access)
   - Discovery Lambda: Read-only permissions for EKS, EC2, Kubernetes
   - Health Monitor: Read-only permissions for health checks
   - API Handler: 
@@ -542,6 +558,8 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
   - Alerts when stopping apps with shared databases
   - Shows "🔗 Shared Resource" badge for databases and NodeGroups shared across applications
   - Displays list of applications sharing the same resource
+  - **Distributed Lock Protection**: Prevents race conditions in concurrent stop scenarios
+  - **Intelligent Stop Logic**: Shows why database was skipped (active apps detected)
 - **Modern UI**: Clean card design with dark mode support
 - **Responsive Design**: Works on desktop and mobile devices
 - **Search & Filter**: Find applications quickly by name, namespace, or hostname
@@ -586,6 +604,47 @@ curl -I --max-time 5 -o /dev/null -s -w "%{http_code}\n" https://mi.dev.mareana.
 9. ✅ Status Consistency Verification
 
 **See [TEST_ALL_APPLICATIONS.md](TEST_ALL_APPLICATIONS.md) for complete testing guide.**
+
+## 🔒 Shared Database Protection & Distributed Locking
+
+The system includes **advanced protection for shared databases** with distributed locking to prevent race conditions:
+
+### **Distributed Lock Mechanism**
+
+- **DynamoDB-Based Locks**: Uses DynamoDB with TTL for distributed locking
+- **Lock Key Pattern**: `LOCK#DB#<db_identifier>` (uses EC2 instance ID or host:port)
+- **Automatic Expiration**: Locks expire after 60 seconds (prevents stuck locks)
+- **Atomic Operations**: Lock acquisition uses conditional writes (prevents conflicts)
+- **Retry Logic**: Exponential backoff with jitter (max 3 retries)
+
+### **Shared Database Stop Workflow**
+
+When stopping an application with shared databases:
+
+1. **Lock Acquisition**: Controller acquires distributed lock for database
+2. **Sharing App Discovery**: Queries registry for all apps sharing the database
+3. **Live Status Checks**: Calls quick-status endpoint for each sharing app (3s timeout)
+4. **Decision Logic**:
+   - If ANY sharing app is **UP** → Skip DB stop, release lock
+   - If ANY sharing app is **UNKNOWN** → Treat as UP (fail-safe), skip DB stop
+   - If ALL sharing apps are **DOWN** → Proceed to stop database
+5. **Lock Release**: Releases lock only if owner matches (prevents hijacking)
+
+### **Race Condition Prevention**
+
+- **Concurrent Stops**: Only one controller can acquire lock at a time
+- **Sequential Stops**: Lock ensures proper ordering of stop operations
+- **Fail-Safe Defaults**: UNKNOWN status = UP (prevents accidental stops)
+- **Lock Timeout**: Automatic expiration prevents stuck locks
+
+### **Quick-Status Endpoint**
+
+- **Endpoint**: `GET /status/quick?app=<app_name>`
+- **Response**: `{ "app": "...", "status": "UP|DOWN|UNKNOWN", "http_code": 200, "timestamp": "..." }`
+- **Timeout**: 3 seconds
+- **Purpose**: Lightweight status check for Controller Lambda shared-app verification
+
+**See [SHARED_DB_LOCK_IMPLEMENTATION.md](SHARED_DB_LOCK_IMPLEMENTATION.md) for complete implementation details.**
 
 ## 🔍 Health Monitoring
 
@@ -704,8 +763,29 @@ This project is provided as-is for use in your environment.
 1. ✅ Review [docs/PREREQUISITES.md](docs/PREREQUISITES.md)
 2. ✅ Tag your resources per [docs/TAGGING.md](docs/TAGGING.md)
 3. ✅ Deploy infrastructure with `terragrunt apply`
-4. ✅ Deploy dashboard to S3/CloudFront
-5. ✅ Start managing your applications!
+4. ✅ Configure Kubernetes RBAC for pod status (see [docs/POD_RBAC_SETUP.md](docs/POD_RBAC_SETUP.md))
+5. ✅ Deploy dashboard to S3/CloudFront
+6. ✅ Start managing your applications!
+
+## 🆕 Recent Updates
+
+### **Distributed Locking for Shared Databases** (Latest)
+- ✅ Distributed lock mechanism using DynamoDB with TTL
+- ✅ Prevents race conditions in concurrent stop scenarios
+- ✅ Quick-status endpoint for lightweight app status checks
+- ✅ Enhanced shared database protection with live status verification
+- ✅ Fail-safe design: UNKNOWN status treated as UP
+
+### **Pod Status Display** (Latest)
+- ✅ Live pod counts from Kubernetes API
+- ✅ RBAC configuration for pod listing permissions
+- ✅ Detailed pod information (running, pending, crashloop)
+- ✅ Graceful error handling for missing permissions
+
+### **Multi-Account Configuration** (Previous)
+- ✅ Centralized `config/config.yaml` for all account settings
+- ✅ Single source of truth for namespace and NodeGroup mappings
+- ✅ Easy deployment to new AWS accounts
 
 ---
 
