@@ -782,3 +782,114 @@
     width: 100%;
   }
 }
+
+/* Cost Section Styles */
+.cost-section {
+  margin-top: 10px;
+}
+
+.cost-display {
+  margin-bottom: 12px;
+  padding: 12px;
+  background-color: var(--bg-secondary, #f8f9fa);
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #dee2e6);
+}
+
+.cost-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 4px 0;
+}
+
+.cost-row:last-child {
+  margin-bottom: 0;
+}
+
+.cost-label {
+  font-weight: 500;
+  color: var(--text-secondary, #6c757d);
+  font-size: 14px;
+}
+
+.cost-value {
+  font-weight: 600;
+  color: var(--text-primary, #212529);
+  font-size: 14px;
+}
+
+.cost-value-large {
+  font-weight: 700;
+  color: #007bff;
+  font-size: 18px;
+}
+
+.cost-placeholder {
+  padding: 12px;
+  color: var(--text-secondary, #6c757d);
+  font-size: 13px;
+  text-align: center;
+}
+
+.cost-button {
+  padding: 8px 16px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.cost-button:hover {
+  background-color: #0056b3;
+}
+
+/* Database Control Styles */
+.db-controls,
+.ec2-controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color, #dee2e6);
+}
+
+.db-btn,
+.ec2-controls button {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.db-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.db-btn-start {
+  background-color: #28a745;
+  color: white;
+}
+
+.db-btn-start:hover:not(:disabled) {
+  background-color: #218838;
+}
+
+.db-btn-stop {
+  background-color: #dc3545;
+  color: white;
+}
+
+.db-btn-stop:hover:not(:disabled) {
+  background-color: #c82333;
+}

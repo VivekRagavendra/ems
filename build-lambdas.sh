@@ -62,6 +62,8 @@ build_lambda "discovery"
 build_lambda "controller"
 build_lambda "health-monitor"
 build_lambda "api-handler"
+build_lambda "cost-tracker"
+build_lambda "scheduler"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ ALL LAMBDA PACKAGES BUILT!"

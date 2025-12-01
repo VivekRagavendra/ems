@@ -9,6 +9,7 @@ import os
 import time
 import boto3
 import requests
+import re
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from kubernetes import client, config
@@ -862,6 +863,14 @@ def get_app_live_status(app_name):
     postgres_state = postgres_result.get('state', 'stopped') if isinstance(postgres_result, dict) else postgres_result
     neo4j_state = neo4j_result.get('state', 'stopped') if isinstance(neo4j_result, dict) else neo4j_result
     
+    # Extract instance IDs and EC2 states
+    postgres_instance_id = postgres_result.get('instance_id') if isinstance(postgres_result, dict) else None
+    neo4j_instance_id = neo4j_result.get('instance_id') if isinstance(neo4j_result, dict) else None
+    
+    # Get EC2 state (running/stopped) - use state field which is already normalized
+    postgres_ec2_state = postgres_state  # state is already 'running' or 'stopped'
+    neo4j_ec2_state = neo4j_state  # state is already 'running' or 'stopped'
+    
     # Build response in required format
     primary_hostname = metadata['hostnames'][0] if metadata['hostnames'] else app_name
     
@@ -876,17 +885,32 @@ def get_app_live_status(app_name):
             'code': http_code,
             'latency_ms': http_latency_ms
         },
+        # Top-level fields for backward compatibility
+        'postgres_host': metadata['postgres_host'],
+        'postgres_port': metadata['postgres_port'],
+        'postgres_instance_id': postgres_instance_id,
+        'postgres_state': postgres_state,
+        'neo4j_host': metadata['neo4j_host'],
+        'neo4j_port': metadata['neo4j_port'],
+        'neo4j_instance_id': neo4j_instance_id,
+        'neo4j_state': neo4j_state,
+        # Structured postgres object
         'postgres': {
             'state': postgres_state,
+            'ec2_state': postgres_ec2_state,  # Explicit EC2 state
             'host': metadata['postgres_host'],
             'port': metadata['postgres_port'],
+            'instance_id': postgres_instance_id,  # CRITICAL: Include instance_id
             'is_shared': postgres_result.get('is_shared', False) if isinstance(postgres_result, dict) else False,
             'shared_with': postgres_result.get('shared_with', []) if isinstance(postgres_result, dict) else []
         },
+        # Structured neo4j object
         'neo4j': {
             'state': neo4j_state,
+            'ec2_state': neo4j_ec2_state,  # Explicit EC2 state
             'host': metadata['neo4j_host'],
             'port': metadata['neo4j_port'],
+            'instance_id': neo4j_instance_id,  # CRITICAL: Include instance_id
             'is_shared': neo4j_result.get('is_shared', False) if isinstance(neo4j_result, dict) else False,
             'shared_with': neo4j_result.get('shared_with', []) if isinstance(neo4j_result, dict) else []
         },
@@ -961,6 +985,36 @@ def lambda_handler(event, context):
     """Main Lambda handler."""
     http_method = event.get('httpMethod', '')
     path = event.get('path', '')
+    
+    # Handle root path - return API information
+    if http_method == 'GET' and (path == '/' or path == ''):
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
+                'service': 'EKS Application Controller API',
+                'version': '1.0',
+                'endpoints': {
+                    'GET /apps': 'List all applications (requires authentication)',
+                    'GET /apps/{app_name}': 'Get application details',
+                    'GET /apps/{app_name}/cost': 'Get application cost data',
+                    'GET /apps/{app_name}/schedule': 'Get application schedule',
+                    'POST /apps/{app_name}/schedule': 'Update application schedule',
+                    'POST /apps/{app_name}/schedule/enable': 'Toggle schedule enabled',
+                    'GET /status/quick?app={app_name}': 'Quick status check',
+                    'POST /start': 'Start application',
+                    'POST /stop': 'Stop application',
+                    'POST /db/start': 'Start database EC2 instance',
+                    'POST /db/stop': 'Stop database EC2 instance',
+                    'POST /ec2/start': 'Start EC2 instance',
+                    'POST /ec2/stop': 'Stop EC2 instance'
+                },
+                'documentation': 'See README.md for API documentation'
+            }, default=str)
+        }
     path_params = event.get('pathParameters') or {}
     
     try:
@@ -980,6 +1034,154 @@ def lambda_handler(event, context):
                     'count': len(apps)
                 }, default=str)
             }
+        
+        # Handle GET /apps/{app}/cost - MUST come before generic /apps/{app_name}
+        elif http_method == 'GET' and '/apps/' in path and '/cost' in path and path_params.get('app_name'):
+            app_name = path_params['app_name']
+            costs_table = dynamodb.Table(os.environ.get('COSTS_TABLE_NAME', 'eks-app-controller-app-costs'))
+            
+            try:
+                # Read from SK="latest" (the summary record)
+                response = costs_table.get_item(
+                    Key={'PK': app_name, 'SK': 'latest'}
+                )
+                
+                if 'Item' in response:
+                    item = response['Item']
+                    cost_breakdown = json.loads(item.get('breakdown', '{}'))
+                    
+                    # Convert Decimal to float for JSON serialization
+                    daily_cost = float(item.get('daily_cost', 0))
+                    mtd_cost = float(item.get('mtd_cost', 0))
+                    projected_monthly_cost = float(item.get('projected_monthly_cost', 0))
+                    
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({
+                            'app': app_name,
+                            'daily_cost': daily_cost,
+                            'mtd_cost': mtd_cost,
+                            'projected_monthly_cost': projected_monthly_cost,
+                            'breakdown': cost_breakdown,
+                            'month': item.get('month'),
+                            'updated_at': item.get('updated_at')
+                        }, default=str)
+                    }
+                else:
+                    # No cost data available yet
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({
+                            'app': app_name,
+                            'message': 'No cost data available yet. Cost tracking runs daily at 00:30 UTC.',
+                            'daily_cost': 0,
+                            'mtd_cost': 0,
+                            'projected_monthly_cost': 0,
+                            'breakdown': {
+                                'nodegroups': 0,
+                                'databases': 0,
+                                'ebs': 0,
+                                'network': 0
+                            }
+                        }, default=str)
+                    }
+            except Exception as e:
+                print(f"Error getting cost data: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
+        
+        # Handle GET /apps/{app}/schedule - MUST come before generic /apps/{app_name}
+        elif http_method == 'GET' and '/apps/' in path and '/schedule' in path and path_params.get('app_name') and '/enable' not in path:
+            app_name = path_params['app_name']
+            schedules_table = dynamodb.Table(os.environ.get('SCHEDULES_TABLE_NAME', 'eks-app-controller-app-schedules'))
+            
+            try:
+                # Try to get from DynamoDB first
+                response = schedules_table.get_item(Key={'app': app_name})
+                
+                if 'Item' in response:
+                    schedule = response['Item']
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({
+                            'app': app_name,
+                            'enabled': schedule.get('enabled', False),
+                            'on': schedule.get('on'),
+                            'off': schedule.get('off'),
+                            'weekdays': schedule.get('weekdays', []),
+                            'source': 'database'
+                        }, default=str)
+                    }
+                else:
+                    # Fallback to config.yaml
+                    try:
+                        apps_config = CONFIG.get('apps', {})
+                        if app_name in apps_config:
+                            schedule = apps_config[app_name].get('schedule', {})
+                            return {
+                                'statusCode': 200,
+                                'headers': {
+                                    'Content-Type': 'application/json',
+                                    'Access-Control-Allow-Origin': '*'
+                                },
+                                'body': json.dumps({
+                                    'app': app_name,
+                                    'enabled': schedule.get('enabled', False),
+                                    'on': schedule.get('on'),
+                                    'off': schedule.get('off'),
+                                    'weekdays': schedule.get('weekdays', []),
+                                    'source': 'config'
+                                }, default=str)
+                            }
+                    except:
+                        pass
+                    
+                    # No schedule found
+                    return {
+                        'statusCode': 200,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({
+                            'app': app_name,
+                            'enabled': False,
+                            'on': None,
+                            'off': None,
+                            'weekdays': [],
+                            'source': 'none'
+                        }, default=str)
+                    }
+            except Exception as e:
+                print(f"Error getting schedule: {e}")
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
         
         # Handle GET /apps/{app_name} - get app details with LIVE status
         elif http_method == 'GET' and path_params.get('app_name'):
@@ -1147,6 +1349,308 @@ def lambda_handler(event, context):
                     'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                 }, default=str)
             }
+        
+        # Handle POST /apps/{app}/schedule - Update schedule for an app
+        elif http_method == 'POST' and '/apps/' in path and '/schedule' in path and path_params.get('app_name') and '/enable' not in path:
+            app_name = path_params['app_name']
+            schedules_table = dynamodb.Table(os.environ.get('SCHEDULES_TABLE_NAME', 'eks-app-controller-app-schedules'))
+            
+            try:
+                body = json.loads(event.get('body', '{}'))
+                enabled = body.get('enabled', False)
+                on_time = body.get('on')
+                off_time = body.get('off')
+                weekdays = body.get('weekdays', [])
+                
+                # Validation
+                if on_time and not re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', on_time):
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Invalid on time format. Expected HH:MM (24-hour)'}, default=str)
+                    }
+                
+                if off_time and not re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', off_time):
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Invalid off time format. Expected HH:MM (24-hour)'}, default=str)
+                    }
+                
+                if on_time == off_time:
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'On and off times cannot be identical'}, default=str)
+                    }
+                
+                valid_weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                if weekdays and not all(day in valid_weekdays for day in weekdays):
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': f'Invalid weekdays. Must be subset of {valid_weekdays}'}, default=str)
+                    }
+                
+                # Save to DynamoDB
+                item = {
+                    'app': app_name,
+                    'enabled': enabled,
+                    'on': on_time,
+                    'off': off_time,
+                    'weekdays': weekdays,
+                    'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                }
+                
+                schedules_table.put_item(Item=item)
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps(item, default=str)
+                }
+            except json.JSONDecodeError:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Invalid JSON in request body'}, default=str)
+                }
+            except Exception as e:
+                print(f"Error updating schedule: {e}")
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
+        
+        # Handle POST /apps/{app}/schedule/enable - Toggle schedule enabled
+        elif http_method == 'POST' and '/apps/' in path and '/schedule/enable' in path and path_params.get('app_name'):
+            app_name = path_params['app_name']
+            schedules_table = dynamodb.Table(os.environ.get('SCHEDULES_TABLE_NAME', 'eks-app-controller-app-schedules'))
+            
+            try:
+                # Get current schedule
+                response = schedules_table.get_item(Key={'app': app_name})
+                
+                if 'Item' in response:
+                    current_enabled = response['Item'].get('enabled', False)
+                    new_enabled = not current_enabled
+                    
+                    schedules_table.update_item(
+                        Key={'app': app_name},
+                        UpdateExpression='SET enabled = :enabled, updated_at = :updated_at',
+                        ExpressionAttributeValues={
+                            ':enabled': new_enabled,
+                            ':updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                        }
+                    )
+                else:
+                    # Create new schedule entry with enabled=True
+                    schedules_table.put_item(Item={
+                        'app': app_name,
+                        'enabled': True,
+                        'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                    })
+                    new_enabled = True
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'app': app_name,
+                        'enabled': new_enabled
+                    }, default=str)
+                }
+            except Exception as e:
+                print(f"Error toggling schedule: {e}")
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
+        
+        # Handle POST /ec2/start - Start an EC2 instance
+        elif http_method == 'POST' and '/ec2/start' in path:
+            try:
+                body = json.loads(event.get('body', '{}'))
+                instance_id = body.get('instance_id')
+                
+                if not instance_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Missing instance_id in request body'}, default=str)
+                    }
+                
+                # Validate instance_id format
+                if not instance_id.startswith('i-'):
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Invalid instance_id format. Must start with "i-"'}, default=str)
+                    }
+                
+                # Invoke Controller Lambda synchronously
+                lambda_client = boto3.client('lambda')
+                controller_function_name = os.environ.get('CONTROLLER_LAMBDA_NAME', 'eks-app-controller-controller')
+                
+                invoke_response = lambda_client.invoke(
+                    FunctionName=controller_function_name,
+                    InvocationType='RequestResponse',  # Synchronous
+                    Payload=json.dumps({
+                        'action': 'ec2_start',
+                        'instance_id': instance_id
+                    })
+                )
+                
+                response_payload = json.loads(invoke_response['Payload'].read().decode('utf-8'))
+                
+                # Controller returns a dict, wrap it in Lambda response format
+                if isinstance(response_payload, dict) and 'statusCode' in response_payload:
+                    return response_payload
+                else:
+                    # Controller returned a plain dict, wrap it
+                    status_code = 200 if response_payload.get('success', False) else 400
+                    return {
+                        'statusCode': status_code,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps(response_payload, default=str)
+                    }
+            except json.JSONDecodeError:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Invalid JSON in request body'}, default=str)
+                }
+            except Exception as e:
+                print(f"Error invoking controller for EC2 start: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
+        
+        # Handle POST /ec2/stop - Stop an EC2 instance
+        elif http_method == 'POST' and '/ec2/stop' in path:
+            try:
+                body = json.loads(event.get('body', '{}'))
+                instance_id = body.get('instance_id')
+                
+                if not instance_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Missing instance_id in request body'}, default=str)
+                    }
+                
+                # Validate instance_id format
+                if not instance_id.startswith('i-'):
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Invalid instance_id format. Must start with "i-"'}, default=str)
+                    }
+                
+                # Invoke Controller Lambda synchronously
+                lambda_client = boto3.client('lambda')
+                controller_function_name = os.environ.get('CONTROLLER_LAMBDA_NAME', 'eks-app-controller-controller')
+                
+                invoke_response = lambda_client.invoke(
+                    FunctionName=controller_function_name,
+                    InvocationType='RequestResponse',  # Synchronous
+                    Payload=json.dumps({
+                        'action': 'ec2_stop',
+                        'instance_id': instance_id
+                    })
+                )
+                
+                response_payload = json.loads(invoke_response['Payload'].read().decode('utf-8'))
+                
+                # Controller returns a dict, wrap it in Lambda response format
+                if isinstance(response_payload, dict) and 'statusCode' in response_payload:
+                    return response_payload
+                else:
+                    # Controller returned a plain dict, wrap it
+                    status_code = 200 if response_payload.get('success', False) else 400
+                    return {
+                        'statusCode': status_code,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps(response_payload, default=str)
+                    }
+            except json.JSONDecodeError:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Invalid JSON in request body'}, default=str)
+                }
+            except Exception as e:
+                print(f"Error invoking controller for EC2 stop: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': str(e)}, default=str)
+                }
         
         # Handle OPTIONS for CORS
         elif http_method == 'OPTIONS':

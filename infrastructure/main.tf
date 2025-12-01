@@ -49,6 +49,75 @@ resource "aws_dynamodb_table" "app_registry" {
   }
 }
 
+# DynamoDB Table for Application Costs
+resource "aws_dynamodb_table" "app_costs" {
+  name         = "${var.project_name}-app-costs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "PK"  # app name
+  range_key    = "SK"   # date YYYY-MM-DD
+
+  attribute {
+    name = "PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "SK"
+    type = "S"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-app-costs"
+    Environment = "production"
+  }
+}
+
+# DynamoDB Table for Application Schedules
+resource "aws_dynamodb_table" "app_schedules" {
+  name         = "${var.project_name}-app-schedules"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "app"
+
+  attribute {
+    name = "app"
+    type = "S"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-app-schedules"
+    Environment = "production"
+  }
+}
+
+# DynamoDB Table for Operation Logs
+resource "aws_dynamodb_table" "operation_logs" {
+  name         = "${var.project_name}-operation-logs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "PK"  # timestamp or operation_id
+  range_key    = "SK"   # app or sort key
+
+  attribute {
+    name = "PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "SK"
+    type = "S"
+  }
+
+  # Enable TTL for automatic log expiration (90 days)
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Name        = "${var.project_name}-operation-logs"
+    Environment = "production"
+  }
+}
+
 # IAM Role for Discovery Lambda
 resource "aws_iam_role" "discovery_lambda_role" {
   name = "${var.project_name}-discovery-lambda-role"
@@ -289,9 +358,16 @@ resource "aws_iam_role_policy" "api_handler_lambda_policy" {
         Effect = "Allow"
         Action = [
           "dynamodb:Scan",
-          "dynamodb:GetItem"
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
         ]
-        Resource = aws_dynamodb_table.app_registry.arn
+        Resource = [
+          aws_dynamodb_table.app_registry.arn,
+          aws_dynamodb_table.app_costs.arn,
+          aws_dynamodb_table.app_schedules.arn
+        ]
       },
       {
         Effect = "Allow"
@@ -323,6 +399,155 @@ resource "aws_iam_role_policy" "api_handler_lambda_policy" {
   })
 }
 
+# IAM Role for Cost Tracker Lambda
+resource "aws_iam_role" "cost_tracker_lambda_role" {
+  name = "${var.project_name}-cost-tracker-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "cost_tracker_lambda_policy" {
+  name = "${var.project_name}-cost-tracker-lambda-policy"
+  role = aws_iam_role.cost_tracker_lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:Scan",
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ]
+        Resource = [
+          aws_dynamodb_table.app_registry.arn,
+          aws_dynamodb_table.app_costs.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ce:GetCostAndUsage",
+          "ce:GetCostForecast"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeVolumes"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "eks:DescribeNodegroup"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricData",
+          "cloudwatch:GetMetricStatistics"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# IAM Role for Scheduler Lambda
+resource "aws_iam_role" "scheduler_lambda_role" {
+  name = "${var.project_name}-scheduler-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "scheduler_lambda_policy" {
+  name = "${var.project_name}-scheduler-lambda-policy"
+  role = aws_iam_role.scheduler_lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:PutItem"
+        ]
+        Resource = [
+          aws_dynamodb_table.app_registry.arn,
+          aws_dynamodb_table.app_schedules.arn,
+          aws_dynamodb_table.operation_logs.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "lambda:InvokeFunction"
+        ]
+        Resource = [
+          "arn:aws:lambda:*:*:function:${var.project_name}-*"
+        ]
+      }
+    ]
+  })
+}
+
 # Lambda Functions (placeholder - actual deployment via zip files)
 # Note: In production, package Lambda functions and upload via CI/CD
 
@@ -344,6 +569,18 @@ resource "aws_cloudwatch_event_rule" "health_check_schedule" {
   schedule_expression = "rate(1 minute)" # Runs 1440x/day for real-time status updates
   # Changed from 15 minutes to 1 minute for immediate status updates
   # Cost impact: Still minimal (~$1-2/month, well within free tier)
+}
+
+resource "aws_cloudwatch_event_rule" "cost_tracker_schedule" {
+  name                = "${var.project_name}-cost-tracker-schedule"
+  description         = "Trigger cost tracker Lambda daily at 00:30 UTC"
+  schedule_expression = "cron(30 0 * * ? *)" # Daily at 00:30 UTC
+}
+
+resource "aws_cloudwatch_event_rule" "scheduler_schedule" {
+  name                = "${var.project_name}-scheduler-schedule"
+  description         = "Trigger scheduler Lambda every 5 minutes"
+  schedule_expression = "rate(5 minutes)" # Runs every 5 minutes
 }
 
 # Outputs

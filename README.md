@@ -13,6 +13,10 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 ## ✨ Key Features
 
 - ✅ **One-Click Operations**: Start/stop entire applications (NodeGroups + databases) with a single click
+- ✅ **Manual Database Control**: Start/stop PostgreSQL and Neo4j EC2 instances independently from the dashboard
+- ✅ **Manual EC2 Control**: Direct control of EC2 instances via dedicated API endpoints
+- ✅ **Per-Application Cost Tracking**: Daily and monthly cost tracking with detailed breakdowns (NodeGroups, PostgreSQL, Neo4j, EBS, Network)
+- ✅ **Intelligent Auto-Scheduling**: IST timezone-aware scheduling with per-app enable/disable switches
 - ✅ **Self-Service Web Dashboard**: Modern React UI with real-time status updates and component-level indicators
 - ✅ **Auto-Discovery**: Automatically detects applications by scanning Kubernetes Ingress resources
 - ✅ **ConfigMap-Based Database Discovery**: Reads database connection details from Kubernetes ConfigMaps (`common-config`)
@@ -120,11 +124,15 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 ```
 
 **Components:**
-- **4 Lambda Functions**: Discovery, Controller, Health Monitor, API Handler
-- **DynamoDB Table**: Central registry for application metadata + distributed locks (TTL-enabled)
-- **API Gateway**: HTTP API for dashboard and automation (includes quick-status endpoint)
-- **EventBridge**: Scheduled triggers for discovery and health checks
-- **React Dashboard**: Lightweight web UI with real-time live status updates
+- **6 Lambda Functions**: Discovery, Controller, Health Monitor, API Handler, Cost Tracker, Scheduler
+- **DynamoDB Tables**: 
+  - Registry: Application metadata + distributed locks (TTL-enabled)
+  - App Costs: Daily and monthly cost records
+  - App Schedules: Runtime schedule overrides
+  - Operation Logs: Operation history
+- **API Gateway**: HTTP API for dashboard and automation (includes quick-status, cost, schedule, DB/EC2 control endpoints)
+- **EventBridge**: Scheduled triggers for discovery, health checks, cost tracking, and scheduling
+- **React Dashboard**: Lightweight web UI with real-time live status updates, cost tracking, and scheduling
 
 **Data Flow:**
 - **Discovery Lambda**: Scans EKS, updates DynamoDB with metadata (runs every 2 hours)
@@ -326,6 +334,8 @@ Quick 297-line reference for the 2.5-day implementation:
 | [docs/reference/COST_SUMMARY.md](docs/reference/COST_SUMMARY.md) | Cost breakdown and estimates |
 | [docs/reference/COST_FAQ.md](docs/reference/COST_FAQ.md) | Cost-related frequently asked questions |
 | [docs/reference/DISCOVERY_LAMBDA_FIXES.md](docs/reference/DISCOVERY_LAMBDA_FIXES.md) | Discovery Lambda bug fixes documentation |
+| [docs/COST_TRACKING.md](docs/COST_TRACKING.md) | Per-application cost tracking documentation |
+| [docs/SCHEDULER.md](docs/SCHEDULER.md) | Intelligent auto-scheduling documentation |
 
 ## 🏷️ Resource Tagging & Database Discovery
 
@@ -560,12 +570,44 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
   - Displays list of applications sharing the same resource
   - **Distributed Lock Protection**: Prevents race conditions in concurrent stop scenarios
   - **Intelligent Stop Logic**: Shows why database was skipped (active apps detected)
+- **Manual Database Controls**: 
+  - Start/Stop buttons for PostgreSQL and Neo4j EC2 instances
+  - Independent control from application start/stop operations
+  - Shows EC2 instance ID and state (Running/Stopped)
+  - Confirmation modals with shared resource warnings
+  - Auto-refresh after actions complete
+- **Cost Tracking**: 
+  - Daily and Month-To-Date (MTD) cost tracking
+  - Projected monthly cost estimates
+  - Detailed breakdown: NodeGroups, PostgreSQL EC2, PostgreSQL EBS, Neo4j EC2, Neo4j EBS, Network
+  - Cost breakdown modal with separate PostgreSQL and Neo4j costs
+- **Auto-Scheduling**: 
+  - IST (Asia/Kolkata) timezone support
+  - Per-application enable/disable switches
+  - Configurable ON/OFF times and weekdays
+  - Next auto-start/stop time display
+  - Runtime schedule overrides via dashboard
 - **Modern UI**: Clean card design with dark mode support
 - **Responsive Design**: Works on desktop and mobile devices
 - **Search & Filter**: Find applications quickly by name, namespace, or hostname
 
-### API Endpoint
+### API Endpoints
 **API Gateway URL**: https://6rgavd4jt7.execute-api.us-east-1.amazonaws.com
+
+**Available Endpoints:**
+- `GET /apps` - List all applications with live status
+- `GET /apps/{app_name}` - Get detailed status for an application
+- `POST /start` - Start an application (NodeGroups + databases)
+- `POST /stop` - Stop an application (NodeGroups + databases)
+- `GET /status/quick?app={app_name}` - Quick status check (UP/DOWN/UNKNOWN)
+- `GET /apps/{app_name}/cost` - Get cost data for an application
+- `GET /apps/{app_name}/schedule` - Get schedule configuration
+- `POST /apps/{app_name}/schedule` - Update schedule configuration
+- `POST /apps/{app_name}/schedule/enable` - Toggle schedule enabled status
+- `POST /db/start` - Manually start a database (PostgreSQL or Neo4j)
+- `POST /db/stop` - Manually stop a database (PostgreSQL or Neo4j)
+- `POST /ec2/start` - Manually start an EC2 instance
+- `POST /ec2/stop` - Manually stop an EC2 instance
 
 See [docs/DASHBOARD_INFO.md](docs/DASHBOARD_INFO.md) for detailed features and deployment.
 
@@ -645,6 +687,82 @@ When stopping an application with shared databases:
 - **Purpose**: Lightweight status check for Controller Lambda shared-app verification
 
 **See [SHARED_DB_LOCK_IMPLEMENTATION.md](SHARED_DB_LOCK_IMPLEMENTATION.md) for complete implementation details.**
+
+## 💰 Cost Tracking
+
+The system includes **per-application cost tracking** with detailed breakdowns:
+
+### **Cost Components Tracked**
+
+1. **NodeGroups**: EC2 instance costs for EKS NodeGroup instances
+   - Calculated from instance types and running hours
+   - Uses static pricing map with fallback estimates
+
+2. **PostgreSQL EC2**: Instance costs for PostgreSQL database servers
+   - Running hours: 24h if running, 0h if stopped
+   - Instance type-based pricing
+
+3. **PostgreSQL EBS**: EBS volume costs for PostgreSQL databases
+   - Calculated from volume size and type (gp2/gp3/io1)
+   - Daily cost = (size_gb × price_per_gb_month) / 30
+
+4. **Neo4j EC2**: Instance costs for Neo4j database servers
+   - Running hours: 24h if running, 0h if stopped
+   - Instance type-based pricing
+
+5. **Neo4j EBS**: EBS volume costs for Neo4j databases
+   - Calculated from volume size and type
+   - Daily cost = (size_gb × price_per_gb_month) / 30
+
+6. **Network**: Data transfer costs
+   - CloudWatch metrics for NetworkIn/NetworkOut
+   - Converted to GB and multiplied by configured price per GB
+
+### **Cost Data Storage**
+
+- **Daily Records**: Stored in `app_costs` table with `SK = YYYY-MM-DD`
+- **Latest Summary**: Stored with `SK = latest` (includes MTD, projected monthly, breakdown)
+- **Automatic Reset**: MTD cost resets on the 1st of every month
+
+### **Accessing Cost Data**
+
+- **Dashboard**: Click "View Cost Breakdown" button on any application card
+- **API**: `GET /apps/{app_name}/cost` returns latest cost summary
+- **Cost Tracker Lambda**: Runs daily at 00:30 UTC to calculate and store costs
+
+**See [docs/COST_TRACKING.md](docs/COST_TRACKING.md) for detailed cost tracking documentation.**
+
+## ⏰ Auto-Scheduling
+
+The system includes **intelligent auto-scheduling** with IST timezone support:
+
+### **Schedule Configuration**
+
+- **Per-Application**: Each application can have its own schedule
+- **Enable/Disable**: Toggle scheduling on/off per application
+- **ON Time**: Scheduled start time (HH:MM format in IST)
+- **OFF Time**: Scheduled stop time (HH:MM format in IST)
+- **Weekdays**: Select which days of the week to run (Mon-Sun)
+
+### **Scheduler Behavior**
+
+- **Timezone**: All times interpreted in IST (Asia/Kolkata)
+- **Frequency**: Scheduler Lambda runs every 5 minutes
+- **Window**: 5-minute window after scheduled time for action execution
+- **Status Checks**: Uses quick-status endpoint to verify app state
+- **Shared Protection**: Honors shared database protection during scheduled stops
+
+### **Schedule Management**
+
+- **Dashboard**: Edit schedules via collapsible "Schedule" panel
+- **API**: 
+  - `GET /apps/{app_name}/schedule` - Get current schedule
+  - `POST /apps/{app_name}/schedule` - Update schedule
+  - `POST /apps/{app_name}/schedule/enable` - Toggle enabled status
+- **Storage**: Schedules stored in `app_schedules` DynamoDB table
+- **Overrides**: Dashboard overrides take precedence over config defaults
+
+**See [docs/SCHEDULER.md](docs/SCHEDULER.md) for detailed scheduling documentation.**
 
 ## 🔍 Health Monitoring
 
@@ -769,14 +887,46 @@ This project is provided as-is for use in your environment.
 
 ## 🆕 Recent Updates
 
-### **Distributed Locking for Shared Databases** (Latest)
+### **Manual Database & EC2 Controls** (Latest)
+- ✅ Manual Start/Stop buttons for PostgreSQL and Neo4j EC2 instances
+- ✅ Direct EC2 instance control via `/ec2/start` and `/ec2/stop` endpoints
+- ✅ Independent database control from application start/stop operations
+- ✅ EC2 state-aware button visibility (Running → Stop, Stopped → Start)
+- ✅ Confirmation modals with shared resource warnings
+- ✅ Auto-refresh after actions complete
+
+### **Per-Application Cost Tracking** (Latest)
+- ✅ Daily cost calculation for each application
+- ✅ Month-To-Date (MTD) cost tracking with automatic monthly reset
+- ✅ Projected monthly cost estimates
+- ✅ Detailed cost breakdown:
+  - NodeGroups (EC2 instance costs)
+  - PostgreSQL EC2 instance costs
+  - PostgreSQL EBS volume costs
+  - Neo4j EC2 instance costs
+  - Neo4j EBS volume costs
+  - Network costs (CloudWatch metrics)
+- ✅ Cost breakdown modal with separate PostgreSQL and Neo4j costs
+- ✅ Cost Tracker Lambda runs daily at 00:30 UTC
+
+### **Intelligent Auto-Scheduling** (Latest)
+- ✅ IST (Asia/Kolkata) timezone support
+- ✅ Per-application enable/disable switches
+- ✅ Configurable ON/OFF times (HH:MM format)
+- ✅ Weekday selection (Mon-Sun)
+- ✅ Runtime schedule overrides via dashboard
+- ✅ Next auto-start/stop time display in IST
+- ✅ Scheduler Lambda runs every 5 minutes
+- ✅ Honors shared database protection during scheduled stops
+
+### **Distributed Locking for Shared Databases** (Previous)
 - ✅ Distributed lock mechanism using DynamoDB with TTL
 - ✅ Prevents race conditions in concurrent stop scenarios
 - ✅ Quick-status endpoint for lightweight app status checks
 - ✅ Enhanced shared database protection with live status verification
 - ✅ Fail-safe design: UNKNOWN status treated as UP
 
-### **Pod Status Display** (Latest)
+### **Pod Status Display** (Previous)
 - ✅ Live pod counts from Kubernetes API
 - ✅ RBAC configuration for pod listing permissions
 - ✅ Detailed pod information (running, pending, crashloop)

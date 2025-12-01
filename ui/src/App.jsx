@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import './App.css'
 import Login from './components/Login'
+import CostBreakdownModal from './components/CostBreakdownModal'
+import SchedulePanel from './components/SchedulePanel'
+import DatabaseControlModal from './components/DatabaseControlModal'
 import { getAuthToken, isAuthenticated, signOut } from './auth/cognito'
 
 // Get API URL from environment or use default
@@ -31,6 +34,41 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState(null)
   const [authenticated, setAuthenticated] = useState(!COGNITO_ENABLED) // If Cognito disabled, start authenticated
   const [checkingAuth, setCheckingAuth] = useState(COGNITO_ENABLED) // Check auth if Cognito enabled
+  const [costModalApp, setCostModalApp] = useState(null)
+  const [apiBaseUrl, setApiBaseUrl] = useState(API_BASE_URL_DEFAULT)
+  const [dbControlModal, setDbControlModal] = useState(null) // { app, dbType, action }
+
+  // Load API URL from config.json on mount
+  useEffect(() => {
+    const loadApiUrl = async () => {
+      try {
+        // Try to load from config.json first
+        const configResponse = await fetch('/config.json')
+        if (configResponse.ok) {
+          const config = await configResponse.json()
+          if (config.apiUrl) {
+            setApiBaseUrl(config.apiUrl)
+            console.log('API URL loaded from config.json:', config.apiUrl)
+            return
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load config.json, using default:', err)
+      }
+      
+      // Fallback to environment variable or default
+      if (import.meta.env.VITE_API_URL) {
+        setApiBaseUrl(import.meta.env.VITE_API_URL)
+        console.log('API URL from environment variable:', import.meta.env.VITE_API_URL)
+      } else {
+        // Use the default (which should be set during build)
+        setApiBaseUrl(API_BASE_URL_DEFAULT)
+        console.log('Using default API URL:', API_BASE_URL_DEFAULT)
+      }
+    }
+    
+    loadApiUrl()
+  }, [])
 
   // Check authentication on mount
   useEffect(() => {
@@ -128,9 +166,36 @@ function App() {
       const data = await response.json()
       console.log('Apps received:', data.apps?.length || 0)
       
+      // Fetch cost data for each app in parallel
+      const appsWithCosts = await Promise.all(
+        (data.apps || []).map(async (app) => {
+          const appName = app.name || app.app_name || app.hostname
+          if (!appName) return app
+          
+          try {
+            const costResponse = await fetch(`${apiBaseUrl}/apps/${encodeURIComponent(appName)}/cost`, {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-cache'
+              }
+            })
+            
+            if (costResponse.ok) {
+              const costData = await costResponse.json()
+              return { ...app, cost_data: costData }
+            }
+          } catch (err) {
+            console.warn(`Failed to fetch cost for ${appName}:`, err)
+          }
+          
+          return app
+        })
+      )
+      
       // Debug: Log pod data for first app
-      if (data.apps && data.apps.length > 0) {
-        const firstApp = data.apps[0]
+      if (appsWithCosts && appsWithCosts.length > 0) {
+        const firstApp = appsWithCosts[0]
         console.log('Sample app pod data:', {
           app: firstApp.name || firstApp.app_name,
           pods: firstApp.pods,
@@ -139,7 +204,7 @@ function App() {
       }
       
       // Normalize API response format (new format -> old format for UI compatibility)
-      const normalizedApps = (data.apps || []).map(app => {
+      const normalizedApps = appsWithCosts.map(app => {
         // New format: { http: { status, code, latency_ms }, postgres: { state, host, port }, ... }
         // Old format: { status, http_status_code, http_latency_ms, postgres_state, postgres_host, ... }
         if (app.http) {
@@ -1005,11 +1070,11 @@ function App() {
                     <div className="database-section">
                       <div>
                         <strong>PostgreSQL</strong>
-                        {app.postgres_host ? (
+                        {app.postgres_host || app.postgres?.host ? (
                           <div className="db-item">
                             <div className="db-connection">
-                              <span className="db-label">Host:</span> {app.postgres_host}
-                              {app.postgres_port && <span>:{app.postgres_port}</span>}
+                              <span className="db-label">Host:</span> {app.postgres_host || app.postgres?.host}
+                              {(app.postgres_port || app.postgres?.port) && <span>:{(app.postgres_port || app.postgres?.port)}</span>}
                             </div>
                             {app.postgres_db && (
                               <div className="db-connection">
@@ -1029,6 +1094,11 @@ function App() {
                                  postgresStatus === 'red' ? '🔴 Stopped' : '⚪ Unknown'}
                               </span>
                             </div>
+                            {(app.postgres_instance_id || app.postgres?.instance_id) && (
+                              <div className="db-connection">
+                                <span className="db-label">Instance ID:</span> {app.postgres_instance_id || app.postgres?.instance_id}
+                              </div>
+                            )}
                             {app.postgres?.is_shared && (
                               <div className="shared-resource-warning">
                                 🔗 <strong>Shared Resource</strong>
@@ -1039,6 +1109,53 @@ function App() {
                                 )}
                               </div>
                             )}
+                            {/* DB Control Buttons - ALWAYS show when host exists */}
+                            <div className="db-controls">
+                              <button
+                                className="start-button"
+                                onClick={() => setDbControlModal({
+                                  app: app,
+                                  dbType: 'postgres',
+                                  action: 'start'
+                                })}
+                                disabled={
+                                  (postgresStatus === 'green' || postgresStatus === 'yellow') || 
+                                  actionLoading[`${appId}-postgres-start`] ||
+                                  !(app.postgres_instance_id || app.postgres?.instance_id)
+                                }
+                                title={
+                                  !(app.postgres_instance_id || app.postgres?.instance_id) 
+                                    ? 'Instance ID not available - cannot start' 
+                                    : (postgresStatus === 'green' || postgresStatus === 'yellow')
+                                      ? 'Database is already running'
+                                      : ''
+                                }
+                              >
+                                {actionLoading[`${appId}-postgres-start`] ? 'Starting...' : '▶ Start PostgreSQL'}
+                              </button>
+                              <button
+                                className="stop-button"
+                                onClick={() => setDbControlModal({
+                                  app: app,
+                                  dbType: 'postgres',
+                                  action: 'stop'
+                                })}
+                                disabled={
+                                  postgresStatus === 'red' || 
+                                  actionLoading[`${appId}-postgres-stop`] ||
+                                  !(app.postgres_instance_id || app.postgres?.instance_id)
+                                }
+                                title={
+                                  !(app.postgres_instance_id || app.postgres?.instance_id) 
+                                    ? 'Instance ID not available - cannot stop' 
+                                    : postgresStatus === 'red'
+                                      ? 'Database is already stopped'
+                                      : ''
+                                }
+                              >
+                                {actionLoading[`${appId}-postgres-stop`] ? 'Stopping...' : '⏹ Stop PostgreSQL'}
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="no-data">No PostgreSQL configuration found</div>
@@ -1046,11 +1163,11 @@ function App() {
                       </div>
                       <div>
                         <strong>Neo4j</strong>
-                        {app.neo4j_host ? (
+                        {app.neo4j_host || app.neo4j?.host ? (
                           <div className="db-item">
                             <div className="db-connection">
-                              <span className="db-label">Host:</span> {app.neo4j_host}
-                              {app.neo4j_port && <span>:{app.neo4j_port}</span>}
+                              <span className="db-label">Host:</span> {app.neo4j_host || app.neo4j?.host}
+                              {(app.neo4j_port || app.neo4j?.port) && <span>:{(app.neo4j_port || app.neo4j?.port)}</span>}
                             </div>
                             {app.neo4j_username && (
                               <div className="db-connection">
@@ -1065,6 +1182,11 @@ function App() {
                                  neo4jStatus === 'red' ? '🔴 Stopped' : '⚪ Unknown'}
                               </span>
                             </div>
+                            {(app.neo4j_instance_id || app.neo4j?.instance_id) && (
+                              <div className="db-connection">
+                                <span className="db-label">Instance ID:</span> {app.neo4j_instance_id || app.neo4j?.instance_id}
+                              </div>
+                            )}
                             {app.neo4j?.is_shared && (
                               <div className="shared-resource-warning">
                                 🔗 <strong>Shared Resource</strong>
@@ -1075,12 +1197,110 @@ function App() {
                                 )}
                               </div>
                             )}
+                            {/* DB Control Buttons - ALWAYS show when host exists */}
+                            <div className="db-controls">
+                              <button
+                                className="start-button"
+                                onClick={() => setDbControlModal({
+                                  app: app,
+                                  dbType: 'neo4j',
+                                  action: 'start'
+                                })}
+                                disabled={
+                                  (neo4jStatus === 'green' || neo4jStatus === 'yellow') || 
+                                  actionLoading[`${appId}-neo4j-start`] ||
+                                  !(app.neo4j_instance_id || app.neo4j?.instance_id)
+                                }
+                                title={
+                                  !(app.neo4j_instance_id || app.neo4j?.instance_id) 
+                                    ? 'Instance ID not available - cannot start' 
+                                    : (neo4jStatus === 'green' || neo4jStatus === 'yellow')
+                                      ? 'Database is already running'
+                                      : ''
+                                }
+                              >
+                                {actionLoading[`${appId}-neo4j-start`] ? 'Starting...' : '▶ Start Neo4j'}
+                              </button>
+                              <button
+                                className="stop-button"
+                                onClick={() => setDbControlModal({
+                                  app: app,
+                                  dbType: 'neo4j',
+                                  action: 'stop'
+                                })}
+                                disabled={
+                                  neo4jStatus === 'red' || 
+                                  actionLoading[`${appId}-neo4j-stop`] ||
+                                  !(app.neo4j_instance_id || app.neo4j?.instance_id)
+                                }
+                                title={
+                                  !(app.neo4j_instance_id || app.neo4j?.instance_id) 
+                                    ? 'Instance ID not available - cannot stop' 
+                                    : neo4jStatus === 'red'
+                                      ? 'Database is already stopped'
+                                      : ''
+                                }
+                              >
+                                {actionLoading[`${appId}-neo4j-stop`] ? 'Stopping...' : '⏹ Stop Neo4j'}
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="no-data">No Neo4j configuration found</div>
                         )}
                       </div>
                     </div>
+                  </div>
+
+                  {/* Cost Tracking */}
+                  <div className="detail-section">
+                    <h3>Cost (Month-To-Date)</h3>
+                    <div className="cost-section">
+                      {app.cost_data ? (
+                        <>
+                          <div className="cost-display">
+                            <div className="cost-row">
+                              <span className="cost-label">Monthly Usage Cost:</span>
+                              <span className="cost-value-large">${(app.cost_data.mtd_cost || 0).toFixed(2)}</span>
+                            </div>
+                            <div className="cost-row">
+                              <span className="cost-label">Projected Monthly Cost:</span>
+                              <span className="cost-value">${(app.cost_data.projected_monthly_cost || 0).toFixed(2)}</span>
+                            </div>
+                            <div className="cost-row">
+                              <span className="cost-label">Daily Cost Today:</span>
+                              <span className="cost-value">${(app.cost_data.daily_cost || 0).toFixed(2)}</span>
+                            </div>
+                          </div>
+                          <button 
+                            className="cost-button"
+                            onClick={() => setCostModalApp(app)}
+                          >
+                            💰 View Cost Breakdown
+                          </button>
+                        </>
+                      ) : (
+                        <div className="cost-placeholder">
+                          <p>Cost data will be available after the next cost tracking run (daily at 00:30 UTC)</p>
+                          <button 
+                            className="cost-button"
+                            onClick={() => setCostModalApp(app)}
+                          >
+                            💰 View Cost Breakdown
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Schedule */}
+                  <div className="detail-section">
+                    <SchedulePanel 
+                      app={app}
+                      apiBaseUrl={apiBaseUrl}
+                      getAuthToken={getAuthToken}
+                      cognitoEnabled={COGNITO_ENABLED}
+                    />
                   </div>
 
                   {/* Certificate Expiry */}
@@ -1153,6 +1373,77 @@ function App() {
         <div className="empty-state">
           <p>No applications found. Run the discovery Lambda to populate the registry.</p>
         </div>
+      )}
+
+      {/* Cost Breakdown Modal */}
+      {costModalApp && (
+        <CostBreakdownModal
+          app={costModalApp}
+          isOpen={!!costModalApp}
+          onClose={() => setCostModalApp(null)}
+          apiBaseUrl={apiBaseUrl}
+          getAuthToken={getAuthToken}
+          cognitoEnabled={COGNITO_ENABLED}
+        />
+      )}
+
+      {/* Database Control Modal */}
+      {dbControlModal && (
+        <DatabaseControlModal
+          isOpen={!!dbControlModal}
+          onClose={() => setDbControlModal(null)}
+          onConfirm={async () => {
+            const { app, dbType, action } = dbControlModal
+            const appName = app.app_name || app.name || app.app
+            const appId = getAppIdentifier(app)
+            const loadingKey = `${appId}-${dbType}-${action}`
+            
+            setActionLoading(prev => ({ ...prev, [loadingKey]: true }))
+            
+            try {
+              const headers = { 'Content-Type': 'application/json' }
+              if (COGNITO_ENABLED) {
+                try {
+                  const token = await getAuthToken()
+                  headers['Authorization'] = `Bearer ${token}`
+                } catch (err) {
+                  console.error('Failed to get auth token:', err)
+                  setAuthenticated(false)
+                  return
+                }
+              }
+              
+              const response = await fetch(`${apiBaseUrl}/db/${action}`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  app: appName,
+                  type: dbType
+                })
+              })
+
+              const data = await response.json()
+              
+              if (data.success) {
+                alert(`✅ ${dbType === 'postgres' ? 'PostgreSQL' : 'Neo4j'} ${action === 'start' ? 'started' : 'stopped'} successfully!`)
+                // Refresh app status
+                fetchApps(false)
+              } else {
+                const errorMsg = data.reason || data.error || data.message || 'Unknown error'
+                alert(`❌ Error: ${errorMsg}`)
+              }
+            } catch (err) {
+              console.error(`Error during DB ${action}:`, err)
+              alert(`❌ Error: ${err.message}`)
+            } finally {
+              setActionLoading(prev => ({ ...prev, [loadingKey]: false }))
+              setDbControlModal(null)
+            }
+          }}
+          app={dbControlModal.app}
+          dbType={dbControlModal.dbType}
+          action={dbControlModal.action}
+        />
       )}
     </div>
   )

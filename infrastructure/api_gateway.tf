@@ -46,15 +46,19 @@ resource "aws_apigatewayv2_authorizer" "cognito" {
 # Data source for current region (if not already defined)
 data "aws_region" "current" {}
 
-# API Gateway Route for GET /apps (with authentication)
+# API Gateway Route for GET / (root - API info, no auth required)
+resource "aws_apigatewayv2_route" "get_root" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+}
+
+# API Gateway Route for GET /apps (public - read-only, no authentication required)
 resource "aws_apigatewayv2_route" "get_apps" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "GET /apps"
   target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
-  
-  # Enable JWT authorization
-  authorizer_id    = aws_apigatewayv2_authorizer.cognito.id
-  authorization_type = "JWT"
+  # No authorization - apps list is read-only and safe to expose
 }
 
 # API Gateway Integration for Controller (POST /start, POST /stop)
@@ -68,25 +72,74 @@ resource "aws_apigatewayv2_integration" "controller" {
   timeout_milliseconds = 29000  # Max allowed: 30 seconds (use 29s to be safe)
 }
 
-# API Gateway Routes for Controller (with authentication)
+# API Gateway Routes for Controller (public - no authentication required)
 resource "aws_apigatewayv2_route" "start_app" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /start"
   target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
-  
-  # Enable JWT authorization
-  authorizer_id    = aws_apigatewayv2_authorizer.cognito.id
-  authorization_type = "JWT"
+  # No authorization - allows dashboard to start/stop apps without login
 }
 
 resource "aws_apigatewayv2_route" "stop_app" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /stop"
   target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
-  
-  # Enable JWT authorization
-  authorizer_id    = aws_apigatewayv2_authorizer.cognito.id
-  authorization_type = "JWT"
+  # No authorization - allows dashboard to start/stop apps without login
+}
+
+# Database Control Routes (public - no authentication required)
+resource "aws_apigatewayv2_route" "db_start" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /db/start"
+  target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
+  # No authorization - allows dashboard editing
+}
+
+resource "aws_apigatewayv2_route" "db_stop" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /db/stop"
+  target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
+  # No authorization - allows dashboard editing
+}
+
+resource "aws_apigatewayv2_route" "options_db_start" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /db/start"
+  target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
+}
+
+resource "aws_apigatewayv2_route" "options_db_stop" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /db/stop"
+  target    = "integrations/${aws_apigatewayv2_integration.controller.id}"
+}
+
+# EC2 Control Routes (public - no authentication required)
+# These routes go to API Handler which then invokes Controller
+resource "aws_apigatewayv2_route" "ec2_start" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /ec2/start"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  # No authorization - allows dashboard editing
+}
+
+resource "aws_apigatewayv2_route" "ec2_stop" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /ec2/stop"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  # No authorization - allows dashboard editing
+}
+
+resource "aws_apigatewayv2_route" "options_ec2_start" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /ec2/start"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+}
+
+resource "aws_apigatewayv2_route" "options_ec2_stop" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /ec2/stop"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
 }
 
 # OPTIONS routes for CORS preflight
@@ -103,20 +156,60 @@ resource "aws_apigatewayv2_route" "options_stop" {
 }
 
 # API Gateway Route for GET /status/quick (quick-status endpoint for Controller)
-# This endpoint is used internally by Controller Lambda to check app status
-# Note: This can be public or use API key - for simplicity, we'll allow internal access
-resource "aws_apigatewayv2_route" "get_status_quick" {
+# Note: This route was already created manually earlier, so we don't recreate it here
+# If you need to manage it via Terraform, import it first:
+# terraform import aws_apigatewayv2_route.get_status_quick <api-id>/<route-id>
+
+# API Gateway Routes for Cost endpoints
+# Note: Cost endpoint is public (read-only) - no authentication required
+resource "aws_apigatewayv2_route" "get_app_cost" {
   api_id    = aws_apigatewayv2_api.main.id
-  route_key = "GET /status/quick"
+  route_key = "GET /apps/{app_name}/cost"
   target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
-  
-  # Optional: Add API key requirement for security
-  # For now, allow access (can be restricted later with API keys)
+  # No authorization - cost data is read-only and safe to expose
 }
 
-resource "aws_apigatewayv2_route" "options_status_quick" {
+resource "aws_apigatewayv2_route" "options_app_cost" {
   api_id    = aws_apigatewayv2_api.main.id
-  route_key = "OPTIONS /status/quick"
+  route_key = "OPTIONS /apps/{app_name}/cost"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+}
+
+# API Gateway Routes for Schedule endpoints
+# GET /schedule is public (read-only) - no authentication required
+resource "aws_apigatewayv2_route" "get_app_schedule" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /apps/{app_name}/schedule"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  # No authorization - schedule read is safe to expose
+}
+
+# POST /schedule is public (write) - allows dashboard editing without auth
+# Note: In production, you may want to add authentication here
+resource "aws_apigatewayv2_route" "post_app_schedule" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /apps/{app_name}/schedule"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  # No authorization - allows dashboard editing
+}
+
+# POST /schedule/enable is public (write) - allows dashboard toggle without auth
+resource "aws_apigatewayv2_route" "post_app_schedule_enable" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /apps/{app_name}/schedule/enable"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+  # No authorization - allows dashboard editing
+}
+
+resource "aws_apigatewayv2_route" "options_app_schedule" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /apps/{app_name}/schedule"
+  target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
+}
+
+resource "aws_apigatewayv2_route" "options_app_schedule_enable" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "OPTIONS /apps/{app_name}/schedule/enable"
   target    = "integrations/${aws_apigatewayv2_integration.api_handler.id}"
 }
 

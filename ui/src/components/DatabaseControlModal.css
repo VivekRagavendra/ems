@@ -1,0 +1,70 @@
+.db-control-modal {
+  max-width: 500px;
+  width: 90%;
+}
+
+.db-control-message {
+  padding: 20px;
+  background-color: var(--bg-secondary, #f8f9fa);
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+
+.db-control-message pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary, #212529);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 20px;
+  border-top: 1px solid var(--border-color, #dee2e6);
+}
+
+.btn-cancel,
+.btn-confirm {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn-cancel {
+  background-color: var(--bg-secondary, #f8f9fa);
+  color: var(--text-primary, #212529);
+}
+
+.btn-cancel:hover {
+  background-color: var(--border-color, #dee2e6);
+}
+
+.btn-confirm {
+  color: white;
+}
+
+.btn-start {
+  background-color: #28a745;
+}
+
+.btn-start:hover {
+  background-color: #218838;
+}
+
+.btn-stop {
+  background-color: #dc3545;
+}
+
+.btn-stop:hover {
+  background-color: #c82333;
+}
+
+

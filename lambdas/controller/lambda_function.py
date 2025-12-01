@@ -310,6 +310,8 @@ def start_ec2_instance(instance_id):
                 private_ip = instance.get('PrivateIpAddress', 'N/A')
                 print(f"   ✅ Instance {instance_id} is RUNNING (IP: {private_ip})")
                 return {
+                    'success': True,
+                    'action': 'started',
                     'instance_id': instance_id,
                     'state': 'running',
                     'private_ip': private_ip
@@ -317,9 +319,12 @@ def start_ec2_instance(instance_id):
             elif current_state == 'stopped':
                 print(f"   ⚠️  Instance {instance_id} is STOPPED (failed to start)")
                 return {
+                    'success': False,
+                    'action': 'failed',
                     'instance_id': instance_id,
                     'state': 'stopped',
-                    'private_ip': None
+                    'private_ip': None,
+                    'error': 'Instance failed to start'
                 }
             
             print(f"   ⏳ Waiting... ({current_state}, {elapsed}s elapsed)")
@@ -329,25 +334,427 @@ def start_ec2_instance(instance_id):
         # Timeout
         print(f"   ⚠️  Timeout waiting for instance {instance_id} to start")
         return {
+            'success': True,
+            'action': 'starting',
             'instance_id': instance_id,
             'state': 'pending',
-            'private_ip': None
+            'private_ip': None,
+            'message': 'Instance is starting (may take a few more minutes)'
         }
         
     except Exception as e:
-        print(f"   ❌ Error starting instance {instance_id}: {str(e)}")
-        raise
+        error_msg = f"Error starting instance {instance_id}: {str(e)}"
+        print(f"   ❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'action': 'error',
+            'instance_id': instance_id,
+            'error': error_msg
+        }
 
 def stop_ec2_instance(instance_id):
-    """Stop an EC2 instance."""
+    """
+    Stop an EC2 instance with optional shared protection.
+    
+    Args:
+        instance_id: EC2 instance ID to stop
+    
+    Returns:
+        dict with success status and details
+    """
+    print(f"\n{'='*70}")
+    print(f"🛑 STOP EC2 INSTANCE: {instance_id}")
+    print(f"{'='*70}")
+    
     try:
+        # Check current state
+        response = ec2.describe_instances(InstanceIds=[instance_id])
+        instance = response['Reservations'][0]['Instances'][0]
+        current_state = instance['State']['Name']
+        
+        if current_state == 'stopped':
+            return {
+                'success': True,
+                'action': 'already_stopped',
+                'instance_id': instance_id,
+                'state': 'stopped',
+                'message': 'EC2 instance is already stopped'
+            }
+        
+        # Check for shared protection if enabled
+        ec2_controls_config = CONFIG.get('ec2_controls', {})
+        shared_protection_enabled = ec2_controls_config.get('shared_protection', False)
+        
+        if shared_protection_enabled:
+            # Check if instance is tagged as Shared
+            tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+            is_shared = tags.get('Shared', '').lower() == 'true'
+            
+            if is_shared:
+                print(f"   🔍 Instance {instance_id} is tagged as Shared - checking dependent apps...")
+                
+                # Find all apps using this instance (by IP or instance ID)
+                private_ip = instance.get('PrivateIpAddress')
+                table = dynamodb.Table(TABLE_NAME)
+                
+                # Scan for apps using this instance
+                sharing_apps = []
+                try:
+                    scan_response = table.scan()
+                    for item in scan_response.get('Items', []):
+                        app_name = item.get('app_name')
+                        # Check if app uses this instance for postgres or neo4j
+                        if (item.get('postgres_instance_id') == instance_id or 
+                            item.get('neo4j_instance_id') == instance_id or
+                            (private_ip and (item.get('postgres_host') == private_ip or 
+                                             item.get('neo4j_host') == private_ip))):
+                            sharing_apps.append(app_name)
+                except Exception as e:
+                    print(f"   ⚠️  Error scanning registry: {e}")
+                
+                if sharing_apps:
+                    # Check if any sharing apps are UP
+                    api_base_url = os.environ.get('API_GATEWAY_URL', '')
+                    if api_base_url:
+                        from urllib.parse import urlencode
+                        active_apps = []
+                        for app in sharing_apps:
+                            try:
+                                url = f"{api_base_url}/status/quick?{urlencode({'app': app})}"
+                                resp = requests.get(url, timeout=3)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    if data.get('status') == 'UP':
+                                        active_apps.append(app)
+                            except:
+                                # Treat UNKNOWN as UP (fail-safe)
+                                active_apps.append(app)
+                        
+                        if active_apps:
+                            return {
+                                'success': False,
+                                'action': 'skipped_shared_active',
+                                'instance_id': instance_id,
+                                'state': current_state,
+                                'reason': f'Shared EC2 instance is used by running apps: {", ".join(active_apps)}',
+                                'active_apps_detected': active_apps,
+                                'sharing_apps': sharing_apps
+                            }
+        
+        # Stop the instance
+        print(f"   🛑 Stopping EC2 instance: {instance_id}")
         response = ec2.stop_instances(InstanceIds=[instance_id])
         state = response['StoppingInstances'][0]['CurrentState']['Name']
-        print(f"Stopping instance {instance_id}, current state: {state}")
-        return True
+        print(f"   Current state: {state}")
+        
+        # Wait for instance to be stopped
+        max_wait = 300  # 5 minutes
+        wait_interval = 10  # Check every 10 seconds
+        elapsed = 0
+        
+        while elapsed < max_wait:
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+            current_state = instance['State']['Name']
+            
+            if current_state == 'stopped':
+                print(f"   ✅ Instance {instance_id} is STOPPED")
+                return {
+                    'success': True,
+                    'action': 'stopped',
+                    'instance_id': instance_id,
+                    'state': 'stopped'
+                }
+            
+            print(f"   ⏳ Waiting... ({current_state}, {elapsed}s elapsed)")
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+        
+        # Timeout
+        print(f"   ⚠️  Timeout waiting for instance {instance_id} to stop")
+        return {
+            'success': True,
+            'action': 'stopping',
+            'instance_id': instance_id,
+            'state': current_state,
+            'message': 'Instance is stopping (may take a few more minutes)'
+        }
+        
     except Exception as e:
-        print(f"Error stopping instance {instance_id}: {str(e)}")
-        raise
+        error_msg = f"Error stopping instance {instance_id}: {str(e)}"
+        print(f"   ❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'action': 'error',
+            'instance_id': instance_id,
+            'error': error_msg
+        }
+
+def start_database(app_name, db_type):
+    """
+    Start a database EC2 instance for an application.
+    
+    Args:
+        app_name: Application name
+        db_type: 'postgres' or 'neo4j'
+    
+    Returns:
+        dict with success status and details
+    """
+    print(f"\n{'='*70}")
+    print(f"🔄 START DATABASE: {db_type.upper()} for {app_name}")
+    print(f"{'='*70}")
+    
+    try:
+        # Get app from registry
+        app_data = get_app_from_registry(app_name)
+        if not app_data:
+            return {
+                'success': False,
+                'error': f'Application {app_name} not found in registry'
+            }
+        
+        # Get database instance ID
+        instance_id = None
+        db_host = None
+        
+        if db_type == 'postgres':
+            instance_id = app_data.get('postgres_instance_id')
+            db_host = app_data.get('postgres_host')
+        elif db_type == 'neo4j':
+            instance_id = app_data.get('neo4j_instance_id')
+            db_host = app_data.get('neo4j_host')
+        else:
+            return {
+                'success': False,
+                'error': f'Invalid db_type: {db_type}. Must be "postgres" or "neo4j"'
+            }
+        
+        if not instance_id and db_host:
+            # Try to find instance by IP
+            try:
+                filters = [
+                    {'Name': 'private-ip-address', 'Values': [db_host]},
+                    {'Name': 'instance-state-name', 'Values': ['running', 'stopped', 'stopping']}
+                ]
+                response = ec2.describe_instances(Filters=filters)
+                for reservation in response.get('Reservations', []):
+                    for instance in reservation.get('Instances', []):
+                        instance_id = instance['InstanceId']
+                        break
+            except Exception as e:
+                print(f"   ⚠️  Error finding instance by IP {db_host}: {e}")
+        
+        if not instance_id:
+            return {
+                'success': False,
+                'error': f'No {db_type} EC2 instance found for {app_name}'
+            }
+        
+        # Check current state
+        try:
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+            current_state = instance['State']['Name']
+            
+            if current_state == 'running':
+                return {
+                    'success': True,
+                    'action': 'already_running',
+                    'db_type': db_type,
+                    'instance_id': instance_id,
+                    'state': 'running',
+                    'message': f'{db_type.upper()} instance is already running'
+                }
+            
+            # Start the instance
+            print(f"   🚀 Starting {db_type.upper()} instance: {instance_id}")
+            result = start_ec2_instance(instance_id)
+            
+            return {
+                'success': True,
+                'action': 'started',
+                'db_type': db_type,
+                'instance_id': instance_id,
+                'state': result.get('state', 'running'),
+                'private_ip': result.get('private_ip')
+            }
+            
+        except Exception as e:
+            error_msg = f"Error starting {db_type} instance: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'success': False,
+                'error': error_msg,
+                'db_type': db_type,
+                'instance_id': instance_id
+            }
+    
+    except Exception as e:
+        error_msg = f"Error in start_database: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': error_msg
+        }
+
+def stop_database(app_name, db_type):
+    """
+    Stop a database EC2 instance for an application.
+    Includes optional shared-resource protection.
+    
+    Args:
+        app_name: Application name
+        db_type: 'postgres' or 'neo4j'
+    
+    Returns:
+        dict with success status and details
+    """
+    print(f"\n{'='*70}")
+    print(f"🛑 STOP DATABASE: {db_type.upper()} for {app_name}")
+    print(f"{'='*70}")
+    
+    try:
+        # Get app from registry
+        app_data = get_app_from_registry(app_name)
+        if not app_data:
+            return {
+                'success': False,
+                'error': f'Application {app_name} not found in registry'
+            }
+        
+        # Get database instance ID and host
+        instance_id = None
+        db_host = None
+        
+        if db_type == 'postgres':
+            instance_id = app_data.get('postgres_instance_id')
+            db_host = app_data.get('postgres_host')
+        elif db_type == 'neo4j':
+            instance_id = app_data.get('neo4j_instance_id')
+            db_host = app_data.get('neo4j_host')
+        else:
+            return {
+                'success': False,
+                'error': f'Invalid db_type: {db_type}. Must be "postgres" or "neo4j"'
+            }
+        
+        if not instance_id and db_host:
+            # Try to find instance by IP
+            try:
+                filters = [
+                    {'Name': 'private-ip-address', 'Values': [db_host]},
+                    {'Name': 'instance-state-name', 'Values': ['running', 'stopped', 'stopping']}
+                ]
+                response = ec2.describe_instances(Filters=filters)
+                for reservation in response.get('Reservations', []):
+                    for instance in reservation.get('Instances', []):
+                        instance_id = instance['InstanceId']
+                        break
+            except Exception as e:
+                print(f"   ⚠️  Error finding instance by IP {db_host}: {e}")
+        
+        if not instance_id:
+            return {
+                'success': False,
+                'error': f'No {db_type} EC2 instance found for {app_name}'
+            }
+        
+        # Check if shared protection is enabled
+        shared_protection = CONFIG.get('db_controls', {}).get('shared_protection', True)
+        
+        if shared_protection:
+            # Check if database is shared and if other apps are running
+            is_shared = is_database_shared(app_data, db_type)
+            
+            if is_shared:
+                print(f"   ℹ️  {db_type.upper()} is SHARED - checking other dependent apps...")
+                sharing_apps = get_sharing_applications(db_host, db_type, app_name)
+                
+                if sharing_apps:
+                    # Check if any sharing apps are UP
+                    api_base_url = os.environ.get('API_GATEWAY_URL', '')
+                    if api_base_url:
+                        from urllib.parse import urlencode
+                        active_apps = []
+                        
+                        for sharing_app in sharing_apps:
+                            try:
+                                url = f"{api_base_url}/status/quick?{urlencode({'app': sharing_app})}"
+                                response = requests.get(url, timeout=3)
+                                if response.ok:
+                                    data = response.json()
+                                    if data.get('status') == 'UP':
+                                        active_apps.append(sharing_app)
+                            except:
+                                # On error, treat as UP (fail-safe)
+                                active_apps.append(sharing_app)
+                        
+                        if active_apps:
+                            return {
+                                'success': False,
+                                'reason': 'shared_apps_active',
+                                'active_apps': active_apps,
+                                'message': f'Cannot stop {db_type.upper()}; shared apps still running: {", ".join(active_apps)}'
+                            }
+        
+        # Check current state
+        try:
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+            current_state = instance['State']['Name']
+            
+            if current_state == 'stopped':
+                return {
+                    'success': True,
+                    'action': 'already_stopped',
+                    'db_type': db_type,
+                    'instance_id': instance_id,
+                    'state': 'stopped',
+                    'message': f'{db_type.upper()} instance is already stopped'
+                }
+            
+            # Stop the instance
+            print(f"   🛑 Stopping {db_type.upper()} instance: {instance_id}")
+            stop_ec2_instance(instance_id)
+            
+            return {
+                'success': True,
+                'action': 'stopped',
+                'db_type': db_type,
+                'instance_id': instance_id,
+                'state': 'stopped'
+            }
+            
+        except Exception as e:
+            error_msg = f"Error stopping {db_type} instance: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'success': False,
+                'error': error_msg,
+                'db_type': db_type,
+                'instance_id': instance_id
+            }
+    
+    except Exception as e:
+        error_msg = f"Error in stop_database: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': error_msg
+        }
 
 def check_database_health(host, port, db_type='postgres'):
     """
@@ -2210,6 +2617,150 @@ def lambda_handler(event, context):
             },
             'body': ''
         }
+    
+    # Handle direct action invocations (from API handler or other Lambdas)
+    if event.get('action') in ['ec2_start', 'ec2_stop']:
+        instance_id = event.get('instance_id')
+        action = event.get('action')
+        
+        if not instance_id:
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'success': False,
+                    'error': 'Missing instance_id'
+                })
+            }
+        
+        try:
+            if action == 'ec2_start':
+                result = start_ec2_instance(instance_id)
+            elif action == 'ec2_stop':
+                result = stop_ec2_instance(instance_id)
+            else:
+                result = {
+                    'success': False,
+                    'error': f'Unknown action: {action}'
+                }
+            
+            status_code = 200 if result.get('success', False) else 400
+            return {
+                'statusCode': status_code,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps(result, default=str)
+            }
+        except Exception as e:
+            error_msg = f"Error handling EC2 operation: {str(e)}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'statusCode': 500,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'success': False,
+                    'error': error_msg
+                })
+            }
+    
+    # Handle POST /db/start and POST /db/stop
+    if http_method == 'POST' and '/db/' in path:
+        try:
+            body = json.loads(event.get('body', '{}'))
+            app_name = body.get('app')
+            db_type = body.get('type')  # 'postgres' or 'neo4j'
+            
+            if not app_name or not db_type:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'success': False,
+                        'error': 'Missing required fields: app and type'
+                    })
+                }
+            
+            if db_type not in ['postgres', 'neo4j']:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'success': False,
+                        'error': 'Invalid type. Must be "postgres" or "neo4j"'
+                    })
+                }
+            
+            if '/db/start' in path:
+                result = start_database(app_name, db_type)
+            elif '/db/stop' in path:
+                result = stop_database(app_name, db_type)
+            else:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'success': False,
+                        'error': 'Invalid path. Use /db/start or /db/stop'
+                    })
+                }
+            
+            status_code = 200 if result.get('success') else 400
+            return {
+                'statusCode': status_code,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps(result, default=str)
+            }
+            
+        except json.JSONDecodeError:
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'success': False,
+                    'error': 'Invalid JSON in request body'
+                })
+            }
+        except Exception as e:
+            error_msg = f"Error handling DB operation: {str(e)}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'statusCode': 500,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'success': False,
+                    'error': error_msg
+                })
+            }
     
     # Handle API Gateway event body parsing
     body = {}

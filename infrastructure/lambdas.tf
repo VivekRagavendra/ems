@@ -7,6 +7,8 @@ locals {
   controller_zip_path     = "${path.module}/../build/controller.zip"
   health_monitor_zip_path = "${path.module}/../build/health-monitor.zip"
   api_handler_zip_path    = "${path.module}/../build/api-handler.zip"
+  cost_tracker_zip_path   = "${path.module}/../build/cost-tracker.zip"
+  scheduler_zip_path      = "${path.module}/../build/scheduler.zip"
 }
 
 # Discovery Lambda
@@ -91,8 +93,10 @@ resource "aws_lambda_function" "api_handler" {
 
   environment {
     variables = {
-      REGISTRY_TABLE_NAME = aws_dynamodb_table.app_registry.name
-      EKS_CLUSTER_NAME    = var.eks_cluster_name
+      REGISTRY_TABLE_NAME    = aws_dynamodb_table.app_registry.name
+      COSTS_TABLE_NAME       = aws_dynamodb_table.app_costs.name
+      SCHEDULES_TABLE_NAME   = aws_dynamodb_table.app_schedules.name
+      EKS_CLUSTER_NAME       = var.eks_cluster_name
     }
   }
 
@@ -129,4 +133,84 @@ resource "aws_cloudwatch_event_target" "health_check_target" {
   rule      = aws_cloudwatch_event_rule.health_check_schedule.name
   target_id = "HealthMonitorLambdaTarget"
   arn       = aws_lambda_function.health_monitor.arn
+}
+
+# Cost Tracker Lambda
+resource "aws_lambda_function" "cost_tracker" {
+  filename         = local.cost_tracker_zip_path
+  source_code_hash = filebase64sha256(local.cost_tracker_zip_path)
+  function_name    = "${var.project_name}-cost-tracker"
+  role             = aws_iam_role.cost_tracker_lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = var.lambda_runtime
+  timeout          = 900  # 15 minutes for cost calculations
+  memory_size      = 512
+
+  environment {
+    variables = {
+      REGISTRY_TABLE_NAME    = aws_dynamodb_table.app_registry.name
+      COSTS_TABLE_NAME       = aws_dynamodb_table.app_costs.name
+      EKS_CLUSTER_NAME       = var.eks_cluster_name
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy.cost_tracker_lambda_policy
+  ]
+}
+
+# Scheduler Lambda
+resource "aws_lambda_function" "scheduler" {
+  filename         = local.scheduler_zip_path
+  source_code_hash = filebase64sha256(local.scheduler_zip_path)
+  function_name    = "${var.project_name}-scheduler"
+  role             = aws_iam_role.scheduler_lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = var.lambda_runtime
+  timeout          = 300  # 5 minutes
+  memory_size      = 256
+
+  environment {
+    variables = {
+      REGISTRY_TABLE_NAME       = aws_dynamodb_table.app_registry.name
+      SCHEDULES_TABLE_NAME      = aws_dynamodb_table.app_schedules.name
+      OPERATION_LOGS_TABLE_NAME  = aws_dynamodb_table.operation_logs.name
+      EKS_CLUSTER_NAME           = var.eks_cluster_name
+      API_GATEWAY_URL            = ""  # Will be set after API Gateway deployment
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy.scheduler_lambda_policy
+  ]
+}
+
+# EventBridge Permissions for new Lambdas
+resource "aws_lambda_permission" "cost_tracker_eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.cost_tracker.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.cost_tracker_schedule.arn
+}
+
+resource "aws_lambda_permission" "scheduler_eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.scheduler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.scheduler_schedule.arn
+}
+
+# EventBridge Targets for new Lambdas
+resource "aws_cloudwatch_event_target" "cost_tracker_target" {
+  rule      = aws_cloudwatch_event_rule.cost_tracker_schedule.name
+  target_id = "CostTrackerLambdaTarget"
+  arn       = aws_lambda_function.cost_tracker.arn
+}
+
+resource "aws_cloudwatch_event_target" "scheduler_target" {
+  rule      = aws_cloudwatch_event_rule.scheduler_schedule.name
+  target_id = "SchedulerLambdaTarget"
+  arn       = aws_lambda_function.scheduler.arn
 }
