@@ -69,35 +69,35 @@ def is_weekday_included(weekdays, current_weekday):
     current_name = weekday_names[current_weekday]
     return current_name in weekdays
 
-def get_app_schedule(app_name):
-    """Get schedule for app from DynamoDB override or config.yaml default."""
-    # First check DynamoDB override
+def get_global_schedule():
+    """Get global schedule from config.yaml (applies to ALL apps)."""
+    global_schedule = CONFIG.get('global_schedule', {})
+    if not global_schedule:
+        print("   ⚠️  No global_schedule found in config.yaml")
+        return None
+    
+    return {
+        'timezone': global_schedule.get('timezone', 'Asia/Kolkata'),
+        'weekdays_start': global_schedule.get('weekdays_start', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
+        'weekdays_stop': global_schedule.get('weekdays_stop', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
+        'weekend_shutdown': global_schedule.get('weekend_shutdown', True),
+        'start_time': global_schedule.get('start_time', '09:00'),
+        'stop_time': global_schedule.get('stop_time', '22:00')
+    }
+
+def get_app_schedule_enabled(app_name):
+    """Get only the enabled flag for app from DynamoDB (times/weekdays come from global_schedule)."""
     schedules_table = dynamodb.Table(SCHEDULES_TABLE_NAME)
     try:
         response = schedules_table.get_item(Key={'app': app_name})
         if 'Item' in response:
             schedule = response['Item']
-            return {
-                'enabled': schedule.get('enabled', False),
-                'on': schedule.get('on'),
-                'off': schedule.get('off'),
-                'weekdays': schedule.get('weekdays', [])
-            }
+            return schedule.get('enabled', False)
     except Exception as e:
-        print(f"   ⚠️  Error reading schedule from DB for {app_name}: {e}")
+        print(f"   ⚠️  Error reading schedule enabled flag from DB for {app_name}: {e}")
     
-    # Fallback to config.yaml
-    apps_config = CONFIG.get('apps', {})
-    if app_name in apps_config:
-        schedule = apps_config[app_name].get('schedule', {})
-        return {
-            'enabled': schedule.get('enabled', False),
-            'on': schedule.get('on'),
-            'off': schedule.get('off'),
-            'weekdays': schedule.get('weekdays', [])
-        }
-    
-    return None
+    # Default to enabled if not found
+    return True
 
 def check_app_status(app_name):
     """Check if app is UP or DOWN using API Handler quick-status endpoint."""
@@ -189,54 +189,6 @@ def log_operation(app_name, action, reason):
     except Exception as e:
         print(f"   ⚠️  Error logging operation: {e}")
 
-def should_trigger_action(app_name, schedule, current_time_ist):
-    """Determine if start/stop action should be triggered."""
-    if not schedule or not schedule.get('enabled'):
-        return None, None
-    
-    on_time_str = schedule.get('on')
-    off_time_str = schedule.get('off')
-    weekdays = schedule.get('weekdays', [])
-    
-    if not on_time_str or not off_time_str:
-        return None, None
-    
-    # Check if today is included in weekdays
-    current_weekday = current_time_ist.weekday()
-    if not is_weekday_included(weekdays, current_weekday):
-        return None, None
-    
-    try:
-        on_time = parse_time_ist(on_time_str)
-        off_time = parse_time_ist(off_time_str)
-        
-        # Create datetime objects for today with the scheduled times
-        on_datetime = current_time_ist.replace(hour=on_time.hour, minute=on_time.minute, second=0, microsecond=0)
-        off_datetime = current_time_ist.replace(hour=off_time.hour, minute=off_time.minute, second=0, microsecond=0)
-        
-        # Check if we're in the 5-minute window after ON time
-        on_window_start = on_datetime
-        on_window_end = on_datetime + timedelta(minutes=5)
-        
-        # Check if we're in the 5-minute window after OFF time
-        off_window_start = off_datetime
-        off_window_end = off_datetime + timedelta(minutes=5)
-        
-        # Check app status
-        is_up = check_app_status(app_name)
-        
-        # Decision logic
-        if on_window_start <= current_time_ist < on_window_end and not is_up:
-            return 'start', f"Scheduled ON time {on_time_str} IST reached"
-        
-        if off_window_start <= current_time_ist < off_window_end and is_up:
-            return 'stop', f"Scheduled OFF time {off_time_str} IST reached"
-        
-        return None, None
-        
-    except Exception as e:
-        print(f"   ❌ Error parsing schedule times: {e}")
-        return None, None
 
 def get_all_apps():
     """Get all applications from registry."""
@@ -251,13 +203,31 @@ def get_all_apps():
 def lambda_handler(event, context):
     """Main Lambda handler."""
     print("="*70)
-    print("⏰ SCHEDULER - Auto-Scheduling Check")
+    print("⏰ SCHEDULER - Auto-Scheduling Check (Global Schedule)")
     print("="*70)
     
     current_time_ist = get_current_ist_time()
     print(f"Current IST time: {current_time_ist.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     try:
+        # Load global schedule (applies to ALL apps)
+        global_schedule = get_global_schedule()
+        if not global_schedule:
+            print("❌ No global_schedule found in config.yaml. Scheduler cannot proceed.")
+            return {
+                'statusCode': 500,
+                'body': json.dumps({
+                    'error': 'Global schedule not configured'
+                })
+            }
+        
+        print(f"📅 Global Schedule:")
+        print(f"   Start Time: {global_schedule['start_time']} IST")
+        print(f"   Stop Time: {global_schedule['stop_time']} IST")
+        print(f"   Weekdays (Start): {', '.join(global_schedule['weekdays_start'])}")
+        print(f"   Weekdays (Stop): {', '.join(global_schedule['weekdays_stop'])}")
+        print(f"   Weekend Shutdown: {global_schedule['weekend_shutdown']}")
+        
         apps = get_all_apps()
         print(f"Found {len(apps)} applications")
         
@@ -267,28 +237,38 @@ def lambda_handler(event, context):
             app_name = app_data.get('app_name') or app_data.get('name') or 'unknown'
             
             try:
-                schedule = get_app_schedule(app_name)
+                # Get only the enabled flag for this app
+                enabled = get_app_schedule_enabled(app_name)
                 
-                if not schedule:
+                if not enabled:
+                    print(f"   ⏭️  {app_name}: Auto-scheduling disabled, skipping")
                     continue
                 
-                action, reason = should_trigger_action(app_name, schedule, current_time_ist)
+                # Check app status before deciding action
+                is_up = check_app_status(app_name)
+                
+                action, reason = should_trigger_action(app_name, global_schedule, enabled, current_time_ist)
                 
                 if action:
-                    print(f"\n🔄 {app_name}: Triggering {action.upper()} - {reason}")
-                    
-                    success = False
-                    if action == 'start':
+                    # Only trigger if state change is needed
+                    if action == 'start' and not is_up:
+                        print(f"\n🔄 {app_name}: Triggering {action.upper()} - {reason}")
                         success = trigger_start(app_name)
-                    elif action == 'stop':
+                        if success:
+                            log_operation(app_name, action, reason)
+                            actions_triggered += 1
+                            print(f"   ✅ {action.upper()} triggered successfully")
+                        else:
+                            print(f"   ❌ Failed to trigger {action}")
+                    elif action == 'stop' and is_up:
+                        print(f"\n🔄 {app_name}: Triggering {action.upper()} - {reason}")
                         success = trigger_stop(app_name)
-                    
-                    if success:
-                        log_operation(app_name, action, reason)
-                        actions_triggered += 1
-                        print(f"   ✅ {action.upper()} triggered successfully")
-                    else:
-                        print(f"   ❌ Failed to trigger {action}")
+                        if success:
+                            log_operation(app_name, action, reason)
+                            actions_triggered += 1
+                            print(f"   ✅ {action.upper()} triggered successfully")
+                        else:
+                            print(f"   ❌ Failed to trigger {action}")
                 else:
                     # Log that schedule was checked but no action needed
                     pass
@@ -309,6 +289,8 @@ def lambda_handler(event, context):
         
     except Exception as e:
         print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             'statusCode': 500,
             'body': json.dumps({

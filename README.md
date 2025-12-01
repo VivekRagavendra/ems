@@ -16,7 +16,7 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 - ✅ **Manual Database Control**: Start/stop PostgreSQL and Neo4j EC2 instances independently from the dashboard
 - ✅ **Manual EC2 Control**: Direct control of EC2 instances via dedicated API endpoints
 - ✅ **Per-Application Cost Tracking**: Daily and monthly cost tracking with detailed breakdowns (NodeGroups, PostgreSQL, Neo4j, EBS, Network)
-- ✅ **Intelligent Auto-Scheduling**: IST timezone-aware scheduling with per-app enable/disable switches
+- ✅ **Intelligent Auto-Scheduling**: Global schedule (Mon-Fri 09:00-22:00 IST, weekend shutdown) with per-app enable/disable switches
 - ✅ **Self-Service Web Dashboard**: Modern React UI with real-time status updates and component-level indicators
 - ✅ **Auto-Discovery**: Automatically detects applications by scanning Kubernetes Ingress resources
 - ✅ **ConfigMap-Based Database Discovery**: Reads database connection details from Kubernetes ConfigMaps (`common-config`)
@@ -128,7 +128,7 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 - **DynamoDB Tables**: 
   - Registry: Application metadata + distributed locks (TTL-enabled)
   - App Costs: Daily and monthly cost records
-  - App Schedules: Runtime schedule overrides
+  - App Schedules: Per-app enable/disable flags (times/weekdays are globally configured)
   - Operation Logs: Operation history
 - **API Gateway**: HTTP API for dashboard and automation (includes quick-status, cost, schedule, DB/EC2 control endpoints)
 - **EventBridge**: Scheduled triggers for discovery, health checks, cost tracking, and scheduling
@@ -601,9 +601,9 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
 - `POST /stop` - Stop an application (NodeGroups + databases)
 - `GET /status/quick?app={app_name}` - Quick status check (UP/DOWN/UNKNOWN)
 - `GET /apps/{app_name}/cost` - Get cost data for an application
-- `GET /apps/{app_name}/schedule` - Get schedule configuration
-- `POST /apps/{app_name}/schedule` - Update schedule configuration
-- `POST /apps/{app_name}/schedule/enable` - Toggle schedule enabled status
+- `GET /apps/{app_name}/schedule` - Get global schedule + enabled flag (read-only)
+- `POST /apps/{app_name}/schedule` - **DISABLED** (returns HTTP 400 - schedule editing disabled)
+- `POST /apps/{app_name}/schedule/enable` - Toggle schedule enabled status (only editable field)
 - `POST /db/start` - Manually start a database (PostgreSQL or Neo4j)
 - `POST /db/stop` - Manually stop a database (PostgreSQL or Neo4j)
 - `POST /ec2/start` - Manually start an EC2 instance
@@ -738,29 +738,48 @@ The system includes **intelligent auto-scheduling** with IST timezone support:
 
 ### **Schedule Configuration**
 
-- **Per-Application**: Each application can have its own schedule
-- **Enable/Disable**: Toggle scheduling on/off per application
-- **ON Time**: Scheduled start time (HH:MM format in IST)
-- **OFF Time**: Scheduled stop time (HH:MM format in IST)
-- **Weekdays**: Select which days of the week to run (Mon-Sun)
+- **Global Schedule**: Single schedule defined in `config.yaml` applies to ALL applications
+  - **Start Time**: 09:00 IST (Monday-Friday)
+  - **Stop Time**: 22:00 IST (Monday-Friday)
+  - **Weekend Shutdown**: Apps automatically stopped on Saturday and Sunday
+  - **Timezone**: All times interpreted in IST (Asia/Kolkata)
+- **Per-Application**: Only the enable/disable toggle is configurable per app
+  - **Enable/Disable**: Toggle scheduling on/off per application via dashboard or API
+  - **Times/Weekdays**: Read-only (centrally configured, cannot be edited)
 
 ### **Scheduler Behavior**
 
+- **Global Schedule**: All apps follow the same schedule from `config.yaml`
 - **Timezone**: All times interpreted in IST (Asia/Kolkata)
 - **Frequency**: Scheduler Lambda runs every 5 minutes
 - **Window**: 5-minute window after scheduled time for action execution
+- **Weekend Logic**: If `weekend_shutdown: true`, apps are stopped on Sat/Sun regardless of weekday settings
 - **Status Checks**: Uses quick-status endpoint to verify app state
 - **Shared Protection**: Honors shared database protection during scheduled stops
 
 ### **Schedule Management**
 
-- **Dashboard**: Edit schedules via collapsible "Schedule" panel
+- **Dashboard**: 
+  - View global schedule (read-only display)
+  - Toggle enable/disable per application (only editable field)
+  - Times and weekdays cannot be edited (centrally managed)
 - **API**: 
-  - `GET /apps/{app_name}/schedule` - Get current schedule
-  - `POST /apps/{app_name}/schedule` - Update schedule
-  - `POST /apps/{app_name}/schedule/enable` - Toggle enabled status
-- **Storage**: Schedules stored in `app_schedules` DynamoDB table
-- **Overrides**: Dashboard overrides take precedence over config defaults
+  - `GET /apps/{app_name}/schedule` - Get global schedule + enabled flag
+  - `POST /apps/{app_name}/schedule` - **DISABLED** (returns HTTP 400 error)
+  - `POST /apps/{app_name}/schedule/enable` - Toggle enabled status (only working endpoint)
+- **Storage**: Only `enabled` flag stored in `app_schedules` DynamoDB table per app
+- **Configuration**: Schedule times/weekdays defined in `config.yaml` → `global_schedule` block
+
+**Configuration Example:**
+```yaml
+global_schedule:
+  timezone: "Asia/Kolkata"
+  weekdays_start: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+  weekdays_stop: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+  weekend_shutdown: true
+  start_time: "09:00"  # IST
+  stop_time: "22:00"  # IST
+```
 
 **See [docs/SCHEDULER.md](docs/SCHEDULER.md) for detailed scheduling documentation.**
 
@@ -910,14 +929,14 @@ This project is provided as-is for use in your environment.
 - ✅ Cost Tracker Lambda runs daily at 00:30 UTC
 
 ### **Intelligent Auto-Scheduling** (Latest)
+- ✅ **Global Schedule**: Single schedule (Mon-Fri 09:00-22:00 IST, weekend shutdown) applies to ALL apps
+- ✅ **Read-Only Configuration**: Schedule times and weekdays are centrally configured in `config.yaml`
+- ✅ **Per-Application Toggle**: Only enable/disable switch is editable per app
 - ✅ IST (Asia/Kolkata) timezone support
-- ✅ Per-application enable/disable switches
-- ✅ Configurable ON/OFF times (HH:MM format)
-- ✅ Weekday selection (Mon-Sun)
-- ✅ Runtime schedule overrides via dashboard
-- ✅ Next auto-start/stop time display in IST
+- ✅ Weekend shutdown enforcement (apps stopped on Sat/Sun)
 - ✅ Scheduler Lambda runs every 5 minutes
 - ✅ Honors shared database protection during scheduled stops
+- ✅ Schedule editing via API/UI is disabled (global schedule only)
 
 ### **Distributed Locking for Shared Databases** (Previous)
 - ✅ Distributed lock mechanism using DynamoDB with TTL

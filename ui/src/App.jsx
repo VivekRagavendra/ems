@@ -1260,8 +1260,8 @@ function App() {
                         <>
                           <div className="cost-display">
                             <div className="cost-row">
-                              <span className="cost-label">Monthly Usage Cost:</span>
-                              <span className="cost-value-large">${(app.cost_data.mtd_cost || 0).toFixed(2)}</span>
+                              <span className="cost-label">Yesterday's Cost:</span>
+                              <span className="cost-value-large">${(app.cost_data.yesterday_cost || 0).toFixed(2)}</span>
                             </div>
                             <div className="cost-row">
                               <span className="cost-label">Projected Monthly Cost:</span>

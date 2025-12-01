@@ -20,16 +20,38 @@ The Cost Tracking feature provides daily cost calculations for each application 
 
 2. **DynamoDB Table: `app_costs`**
    - PK: `app_name`
-   - SK: `date` (YYYY-MM-DD format)
-   - Stores: `daily_cost`, `projected_monthly_cost`, `savings_month_to_date`, `cost_breakdown`
+   - SK: `date` (YYYY-MM-DD format) or `latest` for summary
+   - Daily records store: `daily_cost`, `yesterday_cost`, `cost_breakdown`, `timestamp`
+   - Latest record stores: `daily_cost`, `yesterday_cost`, `projected_monthly_cost`, `mtd_cost`, `breakdown`, `month`, `updated_at`
 
 3. **API Endpoint**: `GET /apps/{app}/cost`
    - Returns latest cost data for an application
    - Returns empty breakdown if no data available
 
 4. **UI Component**: Cost breakdown modal
-   - Displays daily, monthly, and savings
-   - Shows cost breakdown by component
+   - Displays: Yesterday's Cost, Projected Monthly Cost, Daily Cost Today
+   - Shows cost breakdown by component (NodeGroups, PostgreSQL EC2/EBS, Neo4j EC2/EBS, Network)
+
+## Cost Data Fields
+
+### Yesterday's Cost
+- **Field**: `yesterday_cost`
+- **Description**: Total cost for the previous day (in UTC)
+- **Calculation**: Retrieved from the previous day's daily record
+- **UI Display**: "Yesterday's Cost: $X.XX"
+- **Behavior**: If yesterday's cost is not available, shows $0.00
+
+### Daily Cost (Today)
+- **Field**: `daily_cost`
+- **Description**: Total cost for the current day
+- **Calculation**: Calculated fresh on each cost tracker run
+- **UI Display**: "Daily Cost Today: $X.XX"
+
+### Projected Monthly Cost
+- **Field**: `projected_monthly_cost`
+- **Description**: Estimated monthly cost based on today's daily cost
+- **Calculation**: `daily_cost × days_in_current_month`
+- **UI Display**: "Projected Monthly Cost: $X.XX"
 
 ## Cost Calculation Details
 
@@ -96,16 +118,21 @@ Response:
 {
   "app": "mi.dev.mareana.com",
   "daily_cost": 12.50,
+  "yesterday_cost": 11.80,
   "projected_monthly_cost": 375.00,
-  "savings_month_to_date": 0.00,
+  "mtd_cost": 187.50,
   "breakdown": {
     "nodegroups": 10.00,
-    "databases": 2.00,
-    "ebs": 0.30,
+    "postgres_ec2": 1.44,
+    "postgres_ebs": 5.39,
+    "neo4j_ec2": 1.44,
+    "neo4j_ebs": 0.59,
+    "databases": 2.88,
+    "ebs": 5.98,
     "network": 0.20
   },
-  "date": "2024-01-15",
-  "timestamp": "2024-01-15T00:30:00Z"
+  "month": "2024-01",
+  "updated_at": "2024-01-15T00:30:00Z"
 }
 ```
 

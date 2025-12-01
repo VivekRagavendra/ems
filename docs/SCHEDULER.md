@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Auto-Scheduler feature enables automatic start/stop of applications based on configurable schedules. All schedule times are interpreted in **IST (Asia/Kolkata)** timezone.
+The Auto-Scheduler feature enables automatic start/stop of applications based on a **single global schedule** defined in `config.yaml`. All schedule times are interpreted in **IST (Asia/Kolkata)** timezone. Schedule times and weekdays are centrally managed and cannot be edited via UI or API.
 
 ## Architecture
 
@@ -10,43 +10,49 @@ The Auto-Scheduler feature enables automatic start/stop of applications based on
 
 1. **Scheduler Lambda** (`lambdas/scheduler/lambda_function.py`)
    - Runs every 5 minutes via EventBridge
+   - Uses **global schedule** from `config.yaml` (applies to ALL apps)
    - Checks all applications for scheduled actions
    - Triggers start/stop via API Gateway endpoints
 
 2. **DynamoDB Table: `app_schedules`**
    - PK: `app_name`
-   - Stores: `enabled`, `on`, `off`, `weekdays`, `updated_at`
-   - Overrides config.yaml defaults
+   - Stores: `enabled` flag only (times/weekdays come from global_schedule)
+   - Per-app enable/disable toggle
 
 3. **API Endpoints**:
-   - `GET /apps/{app}/schedule` - Get current schedule
-   - `POST /apps/{app}/schedule` - Update schedule
-   - `POST /apps/{app}/schedule/enable` - Toggle enabled state
+   - `GET /apps/{app}/schedule` - Get global schedule + enabled flag (read-only)
+   - `POST /apps/{app}/schedule` - **DISABLED** (returns HTTP 400)
+   - `POST /apps/{app}/schedule/enable` - Toggle enabled state (only this works)
 
 4. **UI Component**: Schedule panel
-   - Configure start/stop times
-   - Select weekdays
-   - Enable/disable scheduling
+   - **Read-only display** of global schedule times and weekdays
+   - Enable/disable toggle (only editable field)
 
-## Schedule Configuration
+## Global Schedule Configuration
 
 ### Format
 
-- **Times**: HH:MM format (24-hour), interpreted in IST
-- **Weekdays**: Array of day names: `["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]`
-- **Enabled**: Boolean flag to enable/disable scheduling
-
-### Example
+The global schedule is defined in `config/config.yaml`:
 
 ```yaml
-apps:
-  "mi.dev.mareana.com":
-    schedule:
-      enabled: true
-      on: "09:00"  # Start at 9:00 AM IST
-      off: "18:00"  # Stop at 6:00 PM IST
-      weekdays: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+global_schedule:
+  timezone: "Asia/Kolkata"
+  weekdays_start: ["Mon", "Tue", "Wed", "Thu", "Fri"]  # Days when apps start
+  weekdays_stop: ["Mon", "Tue", "Wed", "Thu", "Fri"]    # Days when apps stop
+  weekend_shutdown: true  # If true, apps are stopped on Sat/Sun
+  start_time: "09:00"  # Start time in IST (HH:MM format)
+  stop_time: "22:00"   # Stop time in IST (HH:MM format)
 ```
+
+### Default Schedule
+
+- **Monday-Friday**: Start at 09:00 IST, Stop at 22:00 IST
+- **Saturday-Sunday**: Apps are automatically stopped (weekend shutdown enforced)
+
+### Per-App Configuration
+
+- **Enabled Flag**: Each app can have scheduling enabled/disabled via DynamoDB
+- **Times/Weekdays**: Cannot be changed per-app (uses global schedule)
 
 ## Schedule Logic
 

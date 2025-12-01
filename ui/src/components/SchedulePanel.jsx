@@ -46,14 +46,16 @@ function SchedulePanel({ app, apiBaseUrl, getAuthToken, cognitoEnabled }) {
       }
 
       const data = await response.json()
-      if (data.on && data.off && data.weekdays) {
-        setSchedule({
-          enabled: data.enabled || false,
-          on: data.on,
-          off: data.off,
-          weekdays: data.weekdays || []
-        })
-      }
+      // Use global schedule values (read-only)
+      setSchedule({
+        enabled: data.enabled || false,
+        on: data.on || '09:00',
+        off: data.off || '22:00',
+        weekdays: data.weekdays || ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+        weekend_shutdown: data.weekend_shutdown !== undefined ? data.weekend_shutdown : true,
+        read_only: data.read_only || false,
+        message: data.message || null
+      })
     } catch (err) {
       console.error('Error fetching schedule:', err)
       setError(err.message)
@@ -62,41 +64,11 @@ function SchedulePanel({ app, apiBaseUrl, getAuthToken, cognitoEnabled }) {
     }
   }
 
+  // Schedule editing is disabled - only enable/disable toggle works
+  // This function is no longer used but kept for backward compatibility
   const handleSave = async () => {
-    setSaving(true)
-    setError(null)
+    setError('Schedule editing is disabled. Times are centrally configured and cannot be edited.')
     setMessage(null)
-
-    try {
-      const headers = { 'Content-Type': 'application/json' }
-      if (cognitoEnabled) {
-        try {
-          const token = await getAuthToken()
-          headers['Authorization'] = `Bearer ${token}`
-        } catch (err) {
-          console.error('Failed to get auth token:', err)
-        }
-      }
-
-      const response = await fetch(`${apiBaseUrl}/apps/${app.app_name}/schedule`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(schedule)
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || `HTTP ${response.status}`)
-      }
-
-      setMessage('Schedule saved successfully!')
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      console.error('Error saving schedule:', err)
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
   }
 
   const handleToggleEnabled = async () => {
@@ -187,14 +159,22 @@ function SchedulePanel({ app, apiBaseUrl, getAuthToken, cognitoEnabled }) {
       )}
 
       <div className="schedule-form">
+        {schedule.read_only && schedule.message && (
+          <div className="schedule-info-message">
+            ℹ️ {schedule.message}
+          </div>
+        )}
+
         <div className="form-group">
           <label>Start Time (IST):</label>
           <input
             type="time"
             value={schedule.on}
-            onChange={(e) => setSchedule(prev => ({ ...prev, on: e.target.value }))}
-            disabled={!schedule.enabled || saving}
+            disabled={true}
+            readOnly
+            className="read-only-input"
           />
+          <small className="read-only-label">Read-only (centrally configured)</small>
         </div>
 
         <div className="form-group">
@@ -202,39 +182,44 @@ function SchedulePanel({ app, apiBaseUrl, getAuthToken, cognitoEnabled }) {
           <input
             type="time"
             value={schedule.off}
-            onChange={(e) => setSchedule(prev => ({ ...prev, off: e.target.value }))}
-            disabled={!schedule.enabled || saving}
+            disabled={true}
+            readOnly
+            className="read-only-input"
           />
+          <small className="read-only-label">Read-only (centrally configured)</small>
         </div>
 
         <div className="form-group">
           <label>Weekdays:</label>
           <div className="weekdays-selector">
             {weekdays.map(day => (
-              <label key={day} className="weekday-checkbox">
+              <label key={day} className="weekday-checkbox disabled">
                 <input
                   type="checkbox"
                   checked={schedule.weekdays?.includes(day)}
-                  onChange={() => toggleWeekday(day)}
-                  disabled={!schedule.enabled || saving}
+                  disabled={true}
+                  readOnly
                 />
-                <span>{day}</span>
+                <span className={schedule.weekdays?.includes(day) ? 'checked' : ''}>{day}</span>
               </label>
             ))}
           </div>
+          <small className="read-only-label">Read-only (centrally configured)</small>
         </div>
+
+        {schedule.weekend_shutdown && (
+          <div className="form-group">
+            <label>Weekend:</label>
+            <div className="weekend-info">
+              <span className="weekend-shutdown-badge">🔴 Shutdown Enforced</span>
+              <small>Apps are automatically stopped on Saturday and Sunday</small>
+            </div>
+          </div>
+        )}
 
         <div className="schedule-note">
-          <small>All times are in IST (Asia/Kolkata) timezone</small>
+          <small>All times are in IST (Asia/Kolkata) timezone. Schedule times and weekdays are centrally configured and cannot be edited.</small>
         </div>
-
-        <button
-          className="save-button"
-          onClick={handleSave}
-          disabled={saving || !schedule.enabled}
-        >
-          {saving ? 'Saving...' : 'Save Schedule'}
-        </button>
       </div>
     </div>
   )

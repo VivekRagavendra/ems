@@ -78,8 +78,8 @@ function CostBreakdownModal({ app, isOpen, onClose, apiBaseUrl, getAuthToken, co
             <div className="cost-breakdown">
               <div className="cost-summary">
                 <div className="cost-item highlight">
-                  <label>Monthly Usage Cost (MTD):</label>
-                  <span className="cost-value large">{formatCurrency(costData.mtd_cost || 0)}</span>
+                  <label>Yesterday's Cost:</label>
+                  <span className="cost-value large">{formatCurrency(costData.yesterday_cost || 0)}</span>
                 </div>
                 <div className="cost-item">
                   <label>Projected Monthly Cost:</label>

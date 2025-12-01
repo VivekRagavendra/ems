@@ -428,6 +428,25 @@ def calculate_app_cost(app_data):
         'cost_breakdown': cost_breakdown
     }
 
+def get_cost_for_date(table, app_name, date_str):
+    """Get cost for a specific date (YYYY-MM-DD format)."""
+    try:
+        response = table.get_item(
+            Key={'PK': app_name, 'SK': date_str}
+        )
+        
+        if 'Item' in response:
+            item = response['Item']
+            daily_cost = item.get('daily_cost', Decimal('0'))
+            if isinstance(daily_cost, Decimal):
+                return daily_cost
+            else:
+                return Decimal(str(daily_cost))
+        return Decimal('0')
+    except Exception as e:
+        print(f"   ⚠️  Error getting cost for date {date_str}: {e}")
+        return Decimal('0')
+
 def calculate_mtd_cost(table, app_name, current_month):
     """Calculate Month-To-Date cost by summing all daily costs for current month."""
     try:
@@ -467,16 +486,22 @@ def store_cost_record(app_name, cost_data):
     
     now = datetime.utcnow()
     today = now.strftime('%Y-%m-%d')
+    yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
     current_month = now.strftime('%Y-%m')  # YYYY-MM
     current_year = now.year
     current_month_num = now.month
     
     try:
-        # 1. Store daily record (PK=app, SK=YYYY-MM-DD)
+        # 1. Get yesterday's cost (from previous day's record if it exists)
+        yesterday_cost = get_cost_for_date(table, app_name, yesterday)
+        print(f"   📅 Yesterday's cost ({yesterday}): ${yesterday_cost:.2f}")
+        
+        # 2. Store daily record (PK=app, SK=YYYY-MM-DD)
         daily_item = {
             'PK': app_name,
             'SK': today,
             'daily_cost': Decimal(str(cost_data['daily_cost'])),
+            'yesterday_cost': yesterday_cost,  # Store yesterday's cost in today's record
             'cost_breakdown': json.dumps(cost_data['cost_breakdown']),
             'timestamp': now.isoformat() + 'Z'
         }
@@ -484,7 +509,7 @@ def store_cost_record(app_name, cost_data):
         table.put_item(Item=daily_item)
         print(f"   ✅ Stored daily cost record for {app_name} on {today}")
         
-        # 2. Get existing latest record to check if month changed
+        # 3. Get existing latest record to check if month changed
         try:
             latest_response = table.get_item(
                 Key={'PK': app_name, 'SK': 'latest'}
@@ -495,7 +520,7 @@ def store_cost_record(app_name, cost_data):
             print(f"   ⚠️  Error reading existing latest: {e}")
             existing_month = None
         
-        # 3. Calculate MTD cost
+        # 4. Calculate MTD cost (keep for backward compatibility, but not used in UI)
         # If month changed, MTD = today's daily_cost (reset)
         # Otherwise, sum all daily costs for current month
         if existing_month != current_month:
@@ -507,25 +532,26 @@ def store_cost_record(app_name, cost_data):
             mtd_cost = calculate_mtd_cost(table, app_name, current_month)
             print(f"   📊 MTD cost for {current_month}: ${mtd_cost:.2f}")
         
-        # 4. Calculate projected monthly cost
+        # 5. Calculate projected monthly cost
         days_in_month = get_days_in_month(current_year, current_month_num)
         daily_cost_decimal = Decimal(str(cost_data['daily_cost']))
         projected_monthly_cost = daily_cost_decimal * Decimal(str(days_in_month))
         
-        # 5. Store/update latest summary (PK=app, SK=latest)
+        # 6. Store/update latest summary (PK=app, SK=latest)
         latest_item = {
             'PK': app_name,
             'SK': 'latest',
             'month': current_month,
             'daily_cost': daily_cost_decimal,
-            'mtd_cost': mtd_cost,
+            'yesterday_cost': yesterday_cost,  # Add yesterday's cost
+            'mtd_cost': mtd_cost,  # Keep for backward compatibility
             'projected_monthly_cost': projected_monthly_cost,
             'breakdown': json.dumps(cost_data['cost_breakdown']),
             'updated_at': now.isoformat() + 'Z'
         }
         
         table.put_item(Item=latest_item)
-        print(f"   ✅ Updated latest summary: MTD=${mtd_cost:.2f}, Projected=${projected_monthly_cost:.2f}")
+        print(f"   ✅ Updated latest summary: Yesterday=${yesterday_cost:.2f}, Daily=${daily_cost_decimal:.2f}, Projected=${projected_monthly_cost:.2f}")
         
     except Exception as e:
         print(f"   ❌ Error storing cost record: {e}")

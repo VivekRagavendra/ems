@@ -1052,7 +1052,8 @@ def lambda_handler(event, context):
                     
                     # Convert Decimal to float for JSON serialization
                     daily_cost = float(item.get('daily_cost', 0))
-                    mtd_cost = float(item.get('mtd_cost', 0))
+                    yesterday_cost = float(item.get('yesterday_cost', 0))  # New field
+                    mtd_cost = float(item.get('mtd_cost', 0))  # Keep for backward compatibility
                     projected_monthly_cost = float(item.get('projected_monthly_cost', 0))
                     
                     return {
@@ -1064,7 +1065,8 @@ def lambda_handler(event, context):
                         'body': json.dumps({
                             'app': app_name,
                             'daily_cost': daily_cost,
-                            'mtd_cost': mtd_cost,
+                            'yesterday_cost': yesterday_cost,  # New field
+                            'mtd_cost': mtd_cost,  # Keep for backward compatibility but not used in UI
                             'projected_monthly_cost': projected_monthly_cost,
                             'breakdown': cost_breakdown,
                             'month': item.get('month'),
@@ -1083,7 +1085,8 @@ def lambda_handler(event, context):
                             'app': app_name,
                             'message': 'No cost data available yet. Cost tracking runs daily at 00:30 UTC.',
                             'daily_cost': 0,
-                            'mtd_cost': 0,
+                            'yesterday_cost': 0,  # New field
+                            'mtd_cost': 0,  # Keep for backward compatibility
                             'projected_monthly_cost': 0,
                             'breakdown': {
                                 'nodegroups': 0,
@@ -1112,66 +1115,47 @@ def lambda_handler(event, context):
             schedules_table = dynamodb.Table(os.environ.get('SCHEDULES_TABLE_NAME', 'eks-app-controller-app-schedules'))
             
             try:
-                # Try to get from DynamoDB first
-                response = schedules_table.get_item(Key={'app': app_name})
+                # Get global schedule from config.yaml
+                global_schedule = CONFIG.get('global_schedule', {})
+                if not global_schedule:
+                    return {
+                        'statusCode': 500,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*'
+                        },
+                        'body': json.dumps({'error': 'Global schedule not configured'}, default=str)
+                    }
                 
-                if 'Item' in response:
-                    schedule = response['Item']
-                    return {
-                        'statusCode': 200,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({
-                            'app': app_name,
-                            'enabled': schedule.get('enabled', False),
-                            'on': schedule.get('on'),
-                            'off': schedule.get('off'),
-                            'weekdays': schedule.get('weekdays', []),
-                            'source': 'database'
-                        }, default=str)
-                    }
-                else:
-                    # Fallback to config.yaml
-                    try:
-                        apps_config = CONFIG.get('apps', {})
-                        if app_name in apps_config:
-                            schedule = apps_config[app_name].get('schedule', {})
-                            return {
-                                'statusCode': 200,
-                                'headers': {
-                                    'Content-Type': 'application/json',
-                                    'Access-Control-Allow-Origin': '*'
-                                },
-                                'body': json.dumps({
-                                    'app': app_name,
-                                    'enabled': schedule.get('enabled', False),
-                                    'on': schedule.get('on'),
-                                    'off': schedule.get('off'),
-                                    'weekdays': schedule.get('weekdays', []),
-                                    'source': 'config'
-                                }, default=str)
-                            }
-                    except:
-                        pass
-                    
-                    # No schedule found
-                    return {
-                        'statusCode': 200,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({
-                            'app': app_name,
-                            'enabled': False,
-                            'on': None,
-                            'off': None,
-                            'weekdays': [],
-                            'source': 'none'
-                        }, default=str)
-                    }
+                # Get enabled flag from DynamoDB (only flag that can be changed)
+                enabled = True  # Default to enabled
+                try:
+                    response = schedules_table.get_item(Key={'app': app_name})
+                    if 'Item' in response:
+                        enabled = response['Item'].get('enabled', True)
+                except Exception as e:
+                    print(f"Warning: Could not read enabled flag from DB: {e}")
+                
+                # Return global schedule with app-specific enabled flag
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({
+                        'app': app_name,
+                        'enabled': enabled,
+                        'on': global_schedule.get('start_time', '09:00'),
+                        'off': global_schedule.get('stop_time', '22:00'),
+                        'weekdays': global_schedule.get('weekdays_start', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
+                        'weekend_shutdown': global_schedule.get('weekend_shutdown', True),
+                        'timezone': global_schedule.get('timezone', 'Asia/Kolkata'),
+                        'source': 'global',
+                        'read_only': True,
+                        'message': 'Schedule times are centrally configured and cannot be edited'
+                    }, default=str)
+                }
             except Exception as e:
                 print(f"Error getting schedule: {e}")
                 return {
@@ -1350,99 +1334,22 @@ def lambda_handler(event, context):
                 }, default=str)
             }
         
-        # Handle POST /apps/{app}/schedule - Update schedule for an app
+        # Handle POST /apps/{app}/schedule - Schedule editing is DISABLED (global schedule only)
         elif http_method == 'POST' and '/apps/' in path and '/schedule' in path and path_params.get('app_name') and '/enable' not in path:
             app_name = path_params['app_name']
-            schedules_table = dynamodb.Table(os.environ.get('SCHEDULES_TABLE_NAME', 'eks-app-controller-app-schedules'))
             
-            try:
-                body = json.loads(event.get('body', '{}'))
-                enabled = body.get('enabled', False)
-                on_time = body.get('on')
-                off_time = body.get('off')
-                weekdays = body.get('weekdays', [])
-                
-                # Validation
-                if on_time and not re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', on_time):
-                    return {
-                        'statusCode': 400,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': 'Invalid on time format. Expected HH:MM (24-hour)'}, default=str)
-                    }
-                
-                if off_time and not re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', off_time):
-                    return {
-                        'statusCode': 400,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': 'Invalid off time format. Expected HH:MM (24-hour)'}, default=str)
-                    }
-                
-                if on_time == off_time:
-                    return {
-                        'statusCode': 400,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': 'On and off times cannot be identical'}, default=str)
-                    }
-                
-                valid_weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-                if weekdays and not all(day in valid_weekdays for day in weekdays):
-                    return {
-                        'statusCode': 400,
-                        'headers': {
-                            'Content-Type': 'application/json',
-                            'Access-Control-Allow-Origin': '*'
-                        },
-                        'body': json.dumps({'error': f'Invalid weekdays. Must be subset of {valid_weekdays}'}, default=str)
-                    }
-                
-                # Save to DynamoDB
-                item = {
-                    'app': app_name,
-                    'enabled': enabled,
-                    'on': on_time,
-                    'off': off_time,
-                    'weekdays': weekdays,
-                    'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-                }
-                
-                schedules_table.put_item(Item=item)
-                
-                return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps(item, default=str)
-                }
-            except json.JSONDecodeError:
-                return {
-                    'statusCode': 400,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps({'error': 'Invalid JSON in request body'}, default=str)
-                }
-            except Exception as e:
-                print(f"Error updating schedule: {e}")
-                return {
-                    'statusCode': 500,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': json.dumps({'error': str(e)}, default=str)
-                }
+            # Reject schedule edits - only global schedule is allowed
+            return {
+                'statusCode': 400,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'error': 'Schedule editing is disabled. Times are globally managed.',
+                    'message': 'Schedule times and weekdays are centrally configured in config.yaml and cannot be edited via API. Only the enable/disable toggle is available via POST /apps/{app}/schedule/enable'
+                }, default=str)
+            }
         
         # Handle POST /apps/{app}/schedule/enable - Toggle schedule enabled
         elif http_method == 'POST' and '/apps/' in path and '/schedule/enable' in path and path_params.get('app_name'):
