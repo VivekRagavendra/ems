@@ -2,6 +2,11 @@
 # Use pre-built zip files (with dependencies) from build script
 # Run ./build-lambdas.sh before deploying
 
+# Note: VPC configuration is NOT included by default to avoid additional costs
+# If your EKS cluster has a private endpoint only, you'll need to either:
+# 1. Enable public endpoint on EKS cluster (recommended, no cost)
+# 2. Add VPC configuration to Lambda functions (requires NAT Gateway or VPC endpoints, ~$21-32/month)
+
 locals {
   discovery_zip_path      = "${path.module}/../build/discovery.zip"
   controller_zip_path     = "${path.module}/../build/controller.zip"
@@ -26,8 +31,16 @@ resource "aws_lambda_function" "discovery" {
     variables = {
       REGISTRY_TABLE_NAME = aws_dynamodb_table.app_registry.name
       EKS_CLUSTER_NAME    = var.eks_cluster_name
+      CONFIG_NAME         = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
+  # If you need VPC, uncomment and configure:
+  # vpc_config {
+  #   subnet_ids         = data.aws_eks_cluster.main.vpc_config[0].subnet_ids
+  #   security_group_ids = [aws_security_group.lambda_sg.id]
+  # }
 
   depends_on = [
     aws_iam_role_policy.discovery_lambda_policy
@@ -49,8 +62,11 @@ resource "aws_lambda_function" "controller" {
     variables = {
       REGISTRY_TABLE_NAME = aws_dynamodb_table.app_registry.name
       EKS_CLUSTER_NAME    = var.eks_cluster_name
+      CONFIG_NAME         = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
 
   depends_on = [
     aws_iam_role_policy.controller_lambda_policy
@@ -72,8 +88,11 @@ resource "aws_lambda_function" "health_monitor" {
     variables = {
       REGISTRY_TABLE_NAME = aws_dynamodb_table.app_registry.name
       EKS_CLUSTER_NAME    = var.eks_cluster_name
+      CONFIG_NAME         = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
 
   depends_on = [
     aws_iam_role_policy.health_monitor_lambda_policy
@@ -97,8 +116,11 @@ resource "aws_lambda_function" "api_handler" {
       COSTS_TABLE_NAME       = aws_dynamodb_table.app_costs.name
       SCHEDULES_TABLE_NAME   = aws_dynamodb_table.app_schedules.name
       EKS_CLUSTER_NAME       = var.eks_cluster_name
+      CONFIG_NAME            = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
 
   depends_on = [
     aws_iam_role_policy.api_handler_lambda_policy
@@ -151,8 +173,11 @@ resource "aws_lambda_function" "cost_tracker" {
       REGISTRY_TABLE_NAME    = aws_dynamodb_table.app_registry.name
       COSTS_TABLE_NAME       = aws_dynamodb_table.app_costs.name
       EKS_CLUSTER_NAME       = var.eks_cluster_name
+      CONFIG_NAME            = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
 
   depends_on = [
     aws_iam_role_policy.cost_tracker_lambda_policy
@@ -177,8 +202,11 @@ resource "aws_lambda_function" "scheduler" {
       OPERATION_LOGS_TABLE_NAME  = aws_dynamodb_table.operation_logs.name
       EKS_CLUSTER_NAME           = var.eks_cluster_name
       API_GATEWAY_URL            = ""  # Will be set after API Gateway deployment
+      CONFIG_NAME                = var.config_name
     }
   }
+
+  # VPC configuration removed - using public EKS endpoint (no additional cost)
 
   depends_on = [
     aws_iam_role_policy.scheduler_lambda_policy

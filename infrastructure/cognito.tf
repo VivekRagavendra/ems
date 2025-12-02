@@ -62,7 +62,7 @@ resource "aws_cognito_user_pool_client" "web" {
 
 # Cognito User Pool Domain
 resource "aws_cognito_user_pool_domain" "main" {
-  domain       = "${var.project_name}-auth"
+  domain       = "${var.project_name}-auth-${substr(var.aws_account_id, -4, 4)}"  # Add account suffix to avoid conflicts
   user_pool_id = aws_cognito_user_pool.main.id
 }
 

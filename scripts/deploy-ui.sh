@@ -7,7 +7,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UI_DIR="$PROJECT_ROOT/ui"
-CONFIG_FILE="$PROJECT_ROOT/config/config.yaml"
+CONFIG_NAME="${CONFIG_NAME:-config.yaml}"
+CONFIG_FILE="$PROJECT_ROOT/config/$CONFIG_NAME"
 
 # Colors for output
 RED='\033[0;31m'
@@ -22,9 +23,63 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Extract values from config.yaml using Python
-S3_BUCKET=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG_FILE'))['s3']['ui_bucket_name'])")
-API_URL="${API_URL:-$(python3 -c "import yaml; cfg=yaml.safe_load(open('$CONFIG_FILE')); print(cfg.get('ui', {}).get('api_url', ''))")}"
+# Extract values from config file using Python (respects CONFIG_NAME env var)
+export CONFIG_NAME
+S3_BUCKET=$(python3 -c "
+import os
+import sys
+import json
+import subprocess
+
+config_name = os.environ.get('CONFIG_NAME', 'config.yaml')
+script_dir = os.path.dirname(os.path.abspath('$SCRIPT_DIR/load-config.py'))
+project_root = os.path.dirname(script_dir)
+load_config_script = os.path.join(project_root, 'scripts', 'load-config.py')
+
+try:
+    result = subprocess.run(
+        ['python3', load_config_script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, 'CONFIG_NAME': config_name}
+    )
+    if result.returncode != 0:
+        print(f'Error loading config: {result.stderr}', file=sys.stderr)
+        sys.exit(1)
+    config = json.loads(result.stdout)
+    print(config.get('s3', {}).get('ui_bucket_name', ''))
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+")
+
+API_URL="${API_URL:-$(python3 -c "
+import os
+import sys
+import json
+import subprocess
+
+config_name = os.environ.get('CONFIG_NAME', 'config.yaml')
+script_dir = os.path.dirname(os.path.abspath('$SCRIPT_DIR/load-config.py'))
+project_root = os.path.dirname(script_dir)
+load_config_script = os.path.join(project_root, 'scripts', 'load-config.py')
+
+try:
+    result = subprocess.run(
+        ['python3', load_config_script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, 'CONFIG_NAME': config_name}
+    )
+    if result.returncode != 0:
+        print(f'Error loading config: {result.stderr}', file=sys.stderr)
+        sys.exit(1)
+    config = json.loads(result.stdout)
+    print(config.get('ui', {}).get('api_url', ''))
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+")}"
 
 # Allow override via environment variables
 S3_BUCKET="${S3_BUCKET_OVERRIDE:-$S3_BUCKET}"
@@ -57,12 +112,81 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-# Create .env file with API URL
+# Extract Cognito values from config
+COGNITO_USER_POOL_ID=$(python3 -c "
+import os
+import sys
+import json
+import subprocess
+
+config_name = os.environ.get('CONFIG_NAME', 'config.yaml')
+script_dir = os.path.dirname(os.path.abspath('$SCRIPT_DIR/load-config.py'))
+project_root = os.path.dirname(script_dir)
+load_config_script = os.path.join(project_root, 'scripts', 'load-config.py')
+
+try:
+    result = subprocess.run(
+        ['python3', load_config_script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, 'CONFIG_NAME': config_name}
+    )
+    if result.returncode != 0:
+        print('', file=sys.stderr)
+        sys.exit(0)
+    config = json.loads(result.stdout)
+    print(config.get('cognito', {}).get('user_pool_id', ''))
+except Exception:
+    print('')
+")
+
+COGNITO_CLIENT_ID=$(python3 -c "
+import os
+import sys
+import json
+import subprocess
+
+config_name = os.environ.get('CONFIG_NAME', 'config.yaml')
+script_dir = os.path.dirname(os.path.abspath('$SCRIPT_DIR/load-config.py'))
+project_root = os.path.dirname(script_dir)
+load_config_script = os.path.join(project_root, 'scripts', 'load-config.py')
+
+try:
+    result = subprocess.run(
+        ['python3', load_config_script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, 'CONFIG_NAME': config_name}
+    )
+    if result.returncode != 0:
+        print('', file=sys.stderr)
+        sys.exit(0)
+    config = json.loads(result.stdout)
+    print(config.get('cognito', {}).get('client_id', ''))
+except Exception:
+    print('')
+")
+
+# Create .env file with API URL and Cognito config
+ENV_CONTENT=""
 if [ -n "$API_URL" ]; then
-    echo "VITE_API_URL=$API_URL" > .env.production
-else
-    echo "# API URL not set - update config/config.yaml" > .env.production
+    ENV_CONTENT="VITE_API_URL=$API_URL"
 fi
+
+if [ -n "$COGNITO_USER_POOL_ID" ] && [ -n "$COGNITO_CLIENT_ID" ]; then
+    if [ -n "$ENV_CONTENT" ]; then
+        ENV_CONTENT="$ENV_CONTENT"$'\n'
+    fi
+    ENV_CONTENT="${ENV_CONTENT}VITE_COGNITO_USER_POOL_ID=$COGNITO_USER_POOL_ID"$'\n'"VITE_COGNITO_CLIENT_ID=$COGNITO_CLIENT_ID"
+    echo -e "${GREEN}Cognito authentication enabled${NC}"
+    echo -e "  User Pool ID: ${COGNITO_USER_POOL_ID:0:20}..."
+    echo -e "  Client ID: ${COGNITO_CLIENT_ID:0:20}..."
+else
+    echo -e "${YELLOW}Warning: Cognito not configured - authentication will be disabled${NC}"
+    echo "Set cognito.user_pool_id and cognito.client_id in config/$CONFIG_NAME to enable"
+fi
+
+echo "$ENV_CONTENT" > .env.production
 
 # Generate config.json for UI (if API URL is available)
 if [ -n "$API_URL" ]; then

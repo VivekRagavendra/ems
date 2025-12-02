@@ -1,0 +1,164 @@
+aws:
+  account_id: '480787231313'
+  region: us-east-1
+eks:
+  cluster_name: eks-cluster
+ingress:
+  namespace: ingress-ns
+dynamodb:
+  table_name: eks-app-controller-registry
+s3:
+  ui_bucket_name: eks-app-controller-ui-480787231313
+api_gateway: null
+ec2_tags:
+  app_name_key: AppName
+  component_key: Component
+  shared_key: Shared
+app_namespace_mapping:
+  mi-demo-v2.mareana.com: mi-demo
+  airflow-jnj.cloud.mareana.com: airflow-jnj
+  spark-sandbox.cloud.mareana.com: airflow-sandbox
+  mi-airflow-demov3.mareana.com: mi-demov3
+  airflow-demo.cloud.mareana.com: airflow-demo
+  jnj.mareana.com: jnj
+  sentry.mareana.com: sentry
+  sandbox.mareana.com: sandbox
+  spark-demo.cloud.mareana.com: airflow-demo
+  automation-demov3.cloud.mareana.com: automation-demov3
+  timesheet.mareana.com: timesheet
+  airflow-sandbox.cloud.mareana.com: airflow-sandbox
+  k8s-dashboard-demo.mareana.com: kubernetes-dashboard
+  spark-jnj.cloud.mareana.com: airflow-jnj
+  mi-spark-demov3.mareana.com: mi-demov3
+  demo-v3.mareana.com: mi-demov3
+nodegroup_defaults:
+  mi-demo-v2.mareana.com:
+    nodegroup: airflow-demo
+    desired: 2
+    min: 0
+    max: 2
+  airflow-jnj.cloud.mareana.com:
+    nodegroup: airflow-jnj-ng
+    desired: 1
+    min: 1
+    max: 2
+  spark-sandbox.cloud.mareana.com:
+    nodegroup: airflow-sandbox
+    desired: 2
+    min: 1
+    max: 2
+  mi-airflow-demov3.mareana.com:
+    nodegroup: mi-demov3
+    desired: 3
+    min: 2
+    max: 4
+  airflow-demo.cloud.mareana.com:
+    nodegroup: airflow-demo
+    desired: 2
+    min: 0
+    max: 2
+  jnj.mareana.com:
+    nodegroup: jnj
+    desired: 2
+    min: 2
+    max: 3
+  sentry.mareana.com:
+    nodegroup: sentry
+    desired: 1
+    min: 0
+    max: 1
+  sandbox.mareana.com:
+    nodegroup: sandbox
+    desired: 3
+    min: 2
+    max: 4
+  spark-demo.cloud.mareana.com:
+    nodegroup: airflow-demo
+    desired: 2
+    min: 0
+    max: 2
+  automation-demov3.cloud.mareana.com:
+    nodegroup: mi-demov3
+    desired: 3
+    min: 2
+    max: 4
+  timesheet.mareana.com:
+    nodegroup: demov2
+    desired: 3
+    min: 1
+    max: 5
+  airflow-sandbox.cloud.mareana.com:
+    nodegroup: airflow-sandbox
+    desired: 2
+    min: 1
+    max: 2
+  k8s-dashboard-demo.mareana.com:
+    nodegroup: airflow-jnj-ng
+    desired: 1
+    min: 1
+    max: 2
+  spark-jnj.cloud.mareana.com:
+    nodegroup: airflow-jnj-ng
+    desired: 1
+    min: 1
+    max: 2
+  mi-spark-demov3.mareana.com:
+    nodegroup: mi-demov3
+    desired: 3
+    min: 2
+    max: 4
+  demo-v3.mareana.com:
+    nodegroup: mi-demov3
+    desired: 3
+    min: 2
+    max: 4
+eventbridge:
+  discovery_schedule: rate(2 hours)
+  health_check_schedule: rate(15 minutes)
+lambda:
+  runtime: python3.11
+  memory_size: 256
+  timeout: 90
+health_check:
+  timeout: 5
+  retry_count: 3
+ui:
+  auto_refresh_interval: 30
+  api_url: https://qz6ervsv22.execute-api.us-east-1.amazonaws.com
+cognito:
+  user_pool_id: us-east-1_1I3UMxZM8
+  client_id: 6brsnphuvtfn02td15a7sg47dd
+  domain: eks-app-controller-auth-xZM8
+project:
+  name: eks-app-controller
+controller:
+  shared_db_lock_enabled: true
+  lock_ttl_seconds: 60
+  lock_max_retries: 3
+  quick_status_timeout: 3
+db_controls:
+  shared_protection: true
+ec2_controls:
+  shared_protection: false
+cost:
+  region: us-east-1
+  aws_price_per_gb: 0.09
+global_schedule:
+  timezone: Asia/Kolkata
+  weekdays_start:
+  - Mon
+  - Tue
+  - Wed
+  - Thu
+  - Fri
+  weekdays_stop:
+  - Mon
+  - Tue
+  - Wed
+  - Thu
+  - Fri
+  weekend_shutdown: true
+  start_time: 09:00
+  stop_time: '22:00'
+apps:
+  mi.dev.mareana.com: null

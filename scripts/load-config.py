@@ -11,19 +11,22 @@ import yaml
 from pathlib import Path
 
 def find_config_file():
-    """Find the config.yaml file."""
+    """Find the config file based on CONFIG_NAME environment variable."""
+    # Get config name from environment variable (default: config.yaml)
+    config_name = os.environ.get("CONFIG_NAME", "config.yaml")
+    
     # Get the directory where this script is located
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent
     
     # Possible locations
     possible_paths = [
-        project_root / "config" / "config.yaml",
-        Path.cwd() / "config" / "config.yaml",
-        Path.cwd().parent / "config" / "config.yaml",
+        project_root / "config" / config_name,
+        Path.cwd() / "config" / config_name,
+        Path.cwd().parent / "config" / config_name,
     ]
     
-    # Check environment variable
+    # Check environment variable CONFIG_PATH (full path override)
     env_config_path = Path(os.environ.get("CONFIG_PATH", ""))
     if env_config_path.exists():
         possible_paths.insert(0, env_config_path)
@@ -41,7 +44,9 @@ def load_config():
     config_file = find_config_file()
     
     if config_file is None:
-        print("Error: config/config.yaml not found", file=sys.stderr)
+        config_name = os.environ.get("CONFIG_NAME", "config.yaml")
+        print(f"Error: config/{config_name} not found", file=sys.stderr)
+        print(f"Please ensure config/{config_name} exists or set CONFIG_NAME environment variable", file=sys.stderr)
         sys.exit(1)
     
     try:

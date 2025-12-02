@@ -14,24 +14,27 @@ _config_path = None
 
 
 def _find_config_file():
-    """Find the config.yaml file, checking multiple possible locations."""
+    """Find the config file based on CONFIG_NAME environment variable."""
+    # Get config name from environment variable (default: config.yaml)
+    config_name = os.environ.get("CONFIG_NAME", "config.yaml")
+    
     # Get the directory where this file is located
     current_file = Path(__file__).resolve()
     config_dir = current_file.parent
     
     # Possible locations (in order of preference):
-    # 1. config/config.yaml (relative to this file)
-    # 2. ./config/config.yaml (current working directory)
-    # 3. ../config/config.yaml (parent directory)
-    # 4. Environment variable CONFIG_PATH
+    # 1. config/{CONFIG_NAME} (relative to this file - Lambda package)
+    # 2. ./config/{CONFIG_NAME} (current working directory)
+    # 3. ../config/{CONFIG_NAME} (parent directory)
+    # 4. Environment variable CONFIG_PATH (full path override)
     
     possible_paths = [
-        config_dir / "config.yaml",
-        Path.cwd() / "config" / "config.yaml",
-        Path.cwd().parent / "config" / "config.yaml",
+        config_dir / config_name,
+        Path.cwd() / "config" / config_name,
+        Path.cwd().parent / "config" / config_name,
     ]
     
-    # Check environment variable
+    # Check environment variable CONFIG_PATH (full path override)
     env_config_path = os.environ.get("CONFIG_PATH")
     if env_config_path:
         possible_paths.insert(0, Path(env_config_path))
@@ -40,8 +43,8 @@ def _find_config_file():
         if path.exists() and path.is_file():
             return path
     
-    # If running in Lambda, try /opt/config/config.yaml (for Lambda layers)
-    lambda_path = Path("/opt/config/config.yaml")
+    # If running in Lambda, try /opt/config/{CONFIG_NAME} (for Lambda layers)
+    lambda_path = Path("/opt/config") / config_name
     if lambda_path.exists():
         return lambda_path
     
@@ -61,9 +64,11 @@ def load_config():
     config_file = _find_config_file()
     
     if config_file is None:
+        config_name = os.environ.get("CONFIG_NAME", "config.yaml")
         raise FileNotFoundError(
-            "config/config.yaml not found. "
-            "Please ensure config/config.yaml exists or set CONFIG_PATH environment variable."
+            f"Config file 'config/{config_name}' not found. "
+            f"Please ensure config/{config_name} exists or set CONFIG_NAME environment variable. "
+            f"Current CONFIG_NAME: {config_name}"
         )
     
     _config_path = config_file

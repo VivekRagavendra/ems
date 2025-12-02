@@ -1,0 +1,196 @@
+# EKS Application Start/Stop Controller Configuration - UAT
+# This is the UAT configuration file
+# Deploy with: config_name = "config.uat.yaml" in terragrunt.hcl
+
+# AWS Account Configuration
+aws:
+  account_id: "420464349284"
+  region: "us-east-1"
+
+# EKS Cluster Configuration
+eks:
+  cluster_name: "mi-eks-cluster"
+
+# DynamoDB Configuration
+dynamodb:
+  table_name: "eks-app-controller-registry"
+
+# S3 Configuration
+s3:
+  ui_bucket_name: "eks-app-controller-ui-420464349284"  # Update with your bucket name
+
+# API Gateway Configuration
+api_gateway:
+  stage_name: "prod"  # API Gateway stage name
+
+# EC2 Tag Configuration
+ec2_tags:
+  app_name_key: "AppName"
+  component_key: "Component"
+  shared_key: "Shared"
+
+# Application to Namespace Mapping (Authoritative)
+# Format: "hostname": "namespace"
+app_namespace_mapping:
+  "ai360.dev.mareana.com": "ai360"
+  "ebr.dev.mareana.com": "ebr-dev"
+  "flux.dev.mareana.com": "flux-system"
+  "grafana.dev.mareana.com": "monitoring"
+  "gtag.dev.mareana.com": "gtag-dev"
+  "k8s-dashboard.dev.mareana.com": "kubernetes-dashboard"
+  "mi-app-airflow.cloud.mareana.com": "mi-app"
+  "mi-r1-airflow.dev.mareana.com": "mi-r1-dev"
+  "mi-r1-spark.dev.mareana.com": "mi-r1-dev"
+  "mi-r1.dev.mareana.com": "mi-r1-dev"
+  "mi-spark.dev.mareana.com": "mi-app"
+  "mi.dev.mareana.com": "mi-app"
+  "prometheus.dev.mareana.com": "monitoring"
+  "vsm-bms.dev.mareana.com": "vsm-bms"
+  "vsm.dev.mareana.com": "vsm-dev"
+  "lab.dev.mareana.com": "lab-dev"
+
+# NodeGroup Defaults (Authoritative)
+# Format: "hostname": {nodegroup: "name", desired: N, min: N, max: N}
+# Set to null if application has no NodeGroup (only scales pods)
+nodegroup_defaults:
+  "ai360.dev.mareana.com":
+    nodegroup: "ai360-ondemand"
+    desired: 1
+    min: 1
+    max: 2
+  "ebr.dev.mareana.com":
+    nodegroup: "vsm-dev-ng"
+    desired: 1
+    min: 1
+    max: 2
+  "flux.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "grafana.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "k8s-dashboard.dev.mareana.com":
+    nodegroup: "flux"
+    desired: 1
+    min: 1
+    max: 2
+  "prometheus.dev.mareana.com": null
+  "gtag.dev.mareana.com":
+    nodegroup: "gtag-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1-airflow.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1-spark.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-r1.dev.mareana.com":
+    nodegroup: "mi-r1-dev"
+    desired: 1
+    min: 1
+    max: 2
+  "mi-app-airflow.cloud.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 2
+    min: 1
+    max: 2
+  "mi-spark.dev.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 1
+    min: 1
+    max: 2
+  "mi.dev.mareana.com":
+    nodegroup: "mi-app-new"
+    desired: 1
+    min: 1
+    max: 2
+  "vsm-bms.dev.mareana.com": null
+  "vsm.dev.mareana.com":
+    nodegroup: "vsm-dev-ng"
+    desired: 1
+    min: 1
+    max: 2
+  "lab.dev.mareana.com":
+    nodegroup: "lab-dev"
+    desired: 1
+    min: 1
+    max: 2
+
+# EventBridge Schedule Configuration
+eventbridge:
+  discovery_schedule: "rate(2 hours)"
+  health_check_schedule: "rate(15 minutes)"
+
+# Lambda Configuration
+lambda:
+  runtime: "python3.11"
+  memory_size: 256  # MB
+  timeout: 90  # seconds
+
+# Health Check Configuration
+health_check:
+  timeout: 5  # seconds
+  retry_count: 3
+
+# UI Configuration
+ui:
+  auto_refresh_interval: 30  # seconds
+  api_url: "https://6rgavd4jt7.execute-api.us-east-1.amazonaws.com"
+
+# Project Configuration
+project:
+  name: "eks-app-controller"  # Used for resource naming
+
+# Controller Configuration
+controller:
+  shared_db_lock_enabled: true  # Enable distributed locking for shared database stops
+  lock_ttl_seconds: 60  # Lock expiration time in seconds
+  lock_max_retries: 3  # Maximum retry attempts for lock acquisition
+  quick_status_timeout: 3  # Timeout for quick-status endpoint calls (seconds)
+
+# Database Control Configuration
+db_controls:
+  shared_protection: true
+
+# EC2 Instance Control Configuration
+ec2_controls:
+  shared_protection: false  # If true, prevents stopping shared EC2 instances when dependent apps are running  # If true, prevent stopping DB if shared apps are still running
+
+# Cost Tracking Configuration
+cost:
+  region: "us-east-1"  # Default region for price lookup
+  aws_price_per_gb: 0.09  # Fallback network cost per GB (USD)
+
+# Global Auto-Schedule Configuration (applies to ALL applications)
+# This is the ONLY schedule configuration - per-app schedules are disabled
+# Schedule times and weekdays cannot be edited via UI or API
+global_schedule:
+  timezone: "Asia/Kolkata"
+  weekdays_start: ["Mon", "Tue", "Wed", "Thu", "Fri"]  # Days when apps start
+  weekdays_stop: ["Mon", "Tue", "Wed", "Thu", "Fri"]    # Days when apps stop
+  weekend_shutdown: true  # If true, apps are stopped on Sat/Sun
+  start_time: "09:00"  # Start time in IST (HH:MM format)
+  stop_time: "22:00"   # Stop time in IST (HH:MM format)
+
+# Application Configuration
+apps:
+  "mi.dev.mareana.com":
+    # Per-app schedule configuration removed - using global_schedule only
+  
+# API Gateway Configuration (for Controller Lambda)
+# Note: API Gateway URL should be set as environment variable API_GATEWAY_URL
+# or will be constructed from region and stage_name
+api_gateway:
+  # Base URL will be constructed as: https://<api-id>.execute-api.<region>.amazonaws.com
+  # Or set API_GATEWAY_URL environment variable in Controller Lambda
+

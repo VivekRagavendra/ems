@@ -4,8 +4,10 @@
 # Load config using Python script
 locals {
   # Try to load config using Python script, fallback to defaults
+  # Pass CONFIG_NAME environment variable to the script
+  config_name = get_env("CONFIG_NAME", "config.demo.yaml")
   config_json = try(
-    jsondecode(run_cmd("--terragrunt-quiet", "python3", "${get_parent_terragrunt_dir()}/scripts/load-config.py")),
+    jsondecode(run_cmd("--terragrunt-quiet", "bash", "-c", "export CONFIG_NAME='${local.config_name}' && python3 ${get_parent_terragrunt_dir()}/scripts/load-config.py")),
     {}
   )
   
@@ -51,9 +53,11 @@ EOF
 # Inputs passed to OpenTofu - loaded from config/config.yaml
 inputs = {
   aws_region       = local.aws_region
+  aws_account_id   = local.aws_account_id
   eks_cluster_name = local.eks_cluster_name
   project_name     = local.project_name
   lambda_runtime   = local.lambda_runtime
+  config_name      = "config.demo.yaml"  # Using demo account configuration
   
   # EventBridge schedules (cost-optimized)
   discovery_schedule = local.discovery_schedule

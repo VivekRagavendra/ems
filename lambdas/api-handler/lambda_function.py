@@ -772,17 +772,34 @@ def get_app_metadata(app_name):
         print(f"Error getting app metadata for {app_name}: {str(e)}")
         return None
 
-def get_app_live_status(app_name):
+def get_app_live_status(app_name, hostnames_from_ingress=None):
     """
     Get LIVE status for a single application.
     Performs all checks in parallel for speed.
     NO CACHING - all checks are fresh.
+    
+    Args:
+        app_name: Application name
+        hostnames_from_ingress: Optional list of hostnames from Kubernetes Ingress (overrides DynamoDB)
     """
-    # Get metadata from DynamoDB (only for namespace, hostnames, DB hosts)
+    # Get metadata from DynamoDB (only for namespace, DB hosts)
     metadata = get_app_metadata(app_name)
     if not metadata:
         print(f"⚠️  No metadata found for app: {app_name}")
-        return None
+        # If no metadata but we have hostnames from ingress, create minimal metadata
+        if hostnames_from_ingress:
+            namespace = get_namespace_for_app(app_name)
+            metadata = {
+                'app_name': app_name,
+                'namespace': namespace,
+                'hostnames': hostnames_from_ingress,
+                'postgres_host': None,
+                'postgres_port': 5432,
+                'neo4j_host': None,
+                'neo4j_port': 7687
+            }
+        else:
+            return None
     
     # Use authoritative namespace mapping (from config.yaml)
     discovered_namespace = metadata.get('namespace')
@@ -794,7 +811,15 @@ def get_app_live_status(app_name):
     else:
         print(f"✅ Using namespace for {app_name}: {namespace}")
     
-    hostnames = metadata['hostnames']
+    # Use hostnames from Ingress if provided, otherwise fall back to DynamoDB
+    if hostnames_from_ingress:
+        hostnames = hostnames_from_ingress
+        print(f"✅ Using hostnames from Ingress for {app_name}: {hostnames}")
+    else:
+        hostnames = metadata.get('hostnames', [])
+        if not hostnames:
+            hostnames = [app_name]
+    
     primary_hostname = hostnames[0] if hostnames else None
     
     # Get NodeGroup name from defaults
@@ -802,55 +827,38 @@ def get_app_live_status(app_name):
     nodegroup_name = nodegroup_defaults['nodegroup'] if nodegroup_defaults else None
     
     # Perform all checks in parallel
+    # Skip pod checks if we're running low on time (they're slow and not critical for initial display)
     with ThreadPoolExecutor(max_workers=4) as executor:
-        # Submit all checks
+        # Submit critical checks only (HTTP is most important for status)
+        # Skip pod checks entirely for speed
+        http_future = executor.submit(check_http_status_live, primary_hostname)
         db_postgres_future = executor.submit(check_db_state_live, metadata['postgres_host'])
         db_neo4j_future = executor.submit(check_db_state_live, metadata['neo4j_host'])
-        http_future = executor.submit(check_http_status_live, primary_hostname)
-        pods_future = executor.submit(check_pod_state_live, namespace)
         
-        # Get results (with timeout handling)
+        # Get results with ultra-aggressive timeouts
         try:
-            postgres_result = db_postgres_future.result(timeout=30)
+            http_status, http_code, http_latency_ms = http_future.result(timeout=2)  # 2s max for HTTP
         except Exception as e:
-            print(f"⚠️  Error getting postgres result: {str(e)}")
+            print(f"⚠️  HTTP check timeout/error for {app_name}: {str(e)[:50]}")
+            http_status, http_code, http_latency_ms = 'DOWN', 0, None
+        
+        # DB checks with very short timeout - skip if slow
+        try:
+            postgres_result = db_postgres_future.result(timeout=1.5)  # 1.5s max
+        except Exception as e:
             postgres_result = {'state': 'stopped', 'instance_id': None, 'is_shared': False, 'shared_with': []}
         
         try:
-            neo4j_result = db_neo4j_future.result(timeout=30)
+            neo4j_result = db_neo4j_future.result(timeout=1.5)  # 1.5s max
         except Exception as e:
-            print(f"⚠️  Error getting neo4j result: {str(e)}")
             neo4j_result = {'state': 'stopped', 'instance_id': None, 'is_shared': False, 'shared_with': []}
         
-        try:
-            http_status, http_code, http_latency_ms = http_future.result(timeout=10)
-        except Exception as e:
-            print(f"⚠️  Error getting HTTP result: {str(e)}")
-            http_status, http_code, http_latency_ms = 'DOWN', 0, None
-        
-        try:
-            pods = pods_future.result(timeout=30)
-            # Ensure pods dict has all required fields
-            if not isinstance(pods, dict):
-                pods = {'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0, 'running_list': [], 'pending_list': [], 'crashloop_list': []}
-            # Ensure all fields exist
-            pods.setdefault('running', 0)
-            pods.setdefault('pending', 0)
-            pods.setdefault('crashloop', 0)
-            pods.setdefault('total', 0)
-            pods.setdefault('running_list', [])
-            pods.setdefault('pending_list', [])
-            pods.setdefault('crashloop_list', [])
-            print(f"✅ Pod data for {app_name}: running={pods.get('running')}, pending={pods.get('pending')}, crashloop={pods.get('crashloop')}, total={pods.get('total')}")
-        except Exception as e:
-            print(f"⚠️  Error getting pods result for {app_name}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            pods = {
-                'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
-                'running_list': [], 'pending_list': [], 'crashloop_list': [],
-                'error': f'Pod check failed: {str(e)[:100]}'
-            }
+        # Skip pod checks entirely for speed - they're too slow
+        # Pods are not critical for initial display - use defaults
+        pods = {
+            'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+            'running_list': [], 'pending_list': [], 'crashloop_list': []
+        }
     
     # Get NodeGroup state (separate call, can't be parallelized easily with others)
     nodegroups = []
@@ -919,36 +927,185 @@ def get_app_live_status(app_name):
         'last_checked': 'live'
     }
 
+def get_all_ingresses_from_k8s():
+    """
+    Get all Ingress resources from Kubernetes to get latest hostnames.
+    Checks for ingress namespace in config, otherwise scans all namespaces.
+    Returns: dict mapping hostname -> {namespace, ingress_name}
+    """
+    try:
+        load_k8s_config()
+        v1 = client.NetworkingV1Api()
+        
+        # Check if ingress namespace is configured
+        ingress_namespace = CONFIG.get('ingress', {}).get('namespace')
+        
+        ingress_map = {}  # hostname -> {namespace, ingress_name}
+        
+        if ingress_namespace:
+            # Only query the specified ingress namespace
+            print(f"✅ Querying Ingress resources from namespace: {ingress_namespace}")
+            try:
+                ns_ingresses = v1.list_namespaced_ingress(ingress_namespace)
+                print(f"📊 Found {len(ns_ingresses.items)} Ingress resources in {ingress_namespace}")
+                for ingress in ns_ingresses.items:
+                    ingress_name = ingress.metadata.name
+                    print(f"🔍 Processing Ingress: {ingress_name}")
+                    if ingress.spec and ingress.spec.rules:
+                        print(f"  📋 Found {len(ingress.spec.rules)} rules")
+                        for rule in ingress.spec.rules:
+                            if rule.host:
+                                hostname = rule.host
+                                print(f"  ✅ Found hostname: {hostname}")
+                                # Store namespace and ingress name for this hostname
+                                if hostname not in ingress_map:
+                                    ingress_map[hostname] = {
+                                        'namespace': ingress_namespace,
+                                        'ingress_name': ingress_name
+                                    }
+                            else:
+                                print(f"  ⚠️  Rule has no host field")
+                    else:
+                        print(f"  ⚠️  Ingress {ingress_name} has no spec.rules")
+            except Exception as e:
+                print(f"⚠️  Error listing ingresses in {ingress_namespace}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        else:
+            # Fallback: Get all namespaces (original behavior)
+            print(f"ℹ️  No ingress namespace configured, scanning all namespaces")
+            core_v1 = client.CoreV1Api()
+            namespaces = core_v1.list_namespace()
+            
+            for ns in namespaces.items:
+                try:
+                    ns_ingresses = v1.list_namespaced_ingress(ns.metadata.name)
+                    for ingress in ns_ingresses.items:
+                        if ingress.spec and ingress.spec.rules:
+                            for rule in ingress.spec.rules:
+                                if rule.host:
+                                    hostname = rule.host
+                                    # Store namespace and ingress name for this hostname
+                                    if hostname not in ingress_map:
+                                        ingress_map[hostname] = {
+                                            'namespace': ns.metadata.name,
+                                            'ingress_name': ingress.metadata.name
+                                        }
+                except Exception as e:
+                    print(f"⚠️  Error listing ingresses in {ns.metadata.name}: {str(e)}")
+                    continue
+        
+        print(f"✅ Found {len(ingress_map)} unique hostnames from Ingress resources")
+        return ingress_map
+    except Exception as e:
+        print(f"⚠️  Error getting ingresses from Kubernetes: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
 def get_all_apps_live():
     """
     Get LIVE status for all applications.
+    Fetches latest hostnames from Kubernetes Ingress resources.
     Performs all checks in parallel for speed.
     """
     table = dynamodb.Table(TABLE_NAME)
     
     try:
+        # Get latest hostnames from Kubernetes Ingress
+        ingress_map = get_all_ingresses_from_k8s()
+        
+        # Get app metadata from DynamoDB
         response = table.scan()
         apps_metadata = response.get('Items', [])
         
-        # Extract app names
+        # Build app list with latest hostnames from Ingress
+        # Only include apps that are in config.demo.yaml (authoritative source)
         app_names = []
+        app_hostname_map = {}  # app_name -> list of hostnames from Ingress
+        
+        # First, prioritize apps from Ingress that are in config
+        for hostname, ingress_info in ingress_map.items():
+            # Only include if it's in our config mapping (authoritative)
+            if hostname in APP_NAMESPACE_MAPPING:
+                if hostname not in app_names:
+                    app_names.append(hostname)
+                    app_hostname_map[hostname] = [hostname]
+        
+        # Also check DynamoDB for apps in config (in case they're not in Ingress yet)
         for app in apps_metadata:
             app_name = app.get('app_name')
             if isinstance(app_name, dict) and 'S' in app_name:
                 app_name = app_name['S']
-            if app_name:
-                app_names.append(app_name)
+            if not app_name:
+                continue
+            
+            # Only include if it's in our config mapping (filter out old apps)
+            if app_name not in APP_NAMESPACE_MAPPING:
+                continue  # Skip apps not in config
+            
+            # If already added from Ingress, skip
+            if app_name in app_names:
+                continue
+            
+            # Find hostnames for this app from Ingress
+            hostnames = []
+            
+            # First, check if app_name itself is a hostname in ingress_map
+            if app_name in ingress_map:
+                hostnames.append(app_name)
+            
+            # Also check config mapping - if app_name is mapped, use that namespace
+            # and find all hostnames in that namespace
+            namespace = get_namespace_for_app(app_name)
+            for hostname, ingress_info in ingress_map.items():
+                if ingress_info['namespace'] == namespace:
+                    if hostname not in hostnames:
+                        hostnames.append(hostname)
+            
+            # If no hostnames found from Ingress, use app_name
+            if not hostnames:
+                hostnames = [app_name]
+            
+            app_names.append(app_name)
+            app_hostname_map[app_name] = hostnames
+        
+        print(f"✅ Processing {len(app_names)} apps (found {len(ingress_map)} hostnames from Ingress)")
         
         # Get live status for all apps in parallel
+        # Ultra-optimized for API Gateway 30s timeout
+        # Limit to apps in config only (filter out old apps)
+        config_apps = [app for app in app_names if app in APP_NAMESPACE_MAPPING]
+        print(f"✅ Filtered to {len(config_apps)} apps from config (out of {len(app_names)} total)")
+        
         results = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(get_app_live_status, app_name): app_name 
-                      for app_name in app_names}
+        max_workers = min(12, len(config_apps))  # More workers for faster parallel processing
+        start_time = time.time()
+        max_total_time = 15  # Leave 15 seconds buffer for API Gateway 30s limit
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(get_app_live_status, app_name, app_hostname_map.get(app_name)): app_name 
+                      for app_name in config_apps}
             
+            completed_count = 0
             for future in as_completed(futures):
+                # Check if we're approaching timeout
+                elapsed = time.time() - start_time
+                if elapsed > max_total_time:
+                    print(f"⏱️  Approaching API Gateway timeout ({elapsed:.1f}s), returning {completed_count} apps")
+                    # Cancel remaining futures and return what we have
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+                
                 app_name = futures[future]
                 try:
-                    result = future.result(timeout=60)  # 60 second timeout per app
+                    # Ultra-aggressive timeout: 1.5 seconds per app max
+                    remaining_time = max_total_time - elapsed
+                    timeout = min(1.5, max(0.3, remaining_time - 0.1))  # At least 0.3s, max 1.5s
+                    result = future.result(timeout=timeout)
+                    completed_count += 1
                     if result:
                         # Ensure pods data is always present
                         if 'pods' not in result or not result['pods']:
@@ -958,6 +1115,22 @@ def get_all_apps_live():
                                 'running_list': [], 'pending_list': [], 'crashloop_list': []
                             }
                         results.append(result)
+                except TimeoutError:
+                    print(f"⏱️  Timeout getting live status for {app_name} ({timeout}s limit)")
+                    # Add app with minimal data so UI doesn't break
+                    results.append({
+                        'app': app_name,
+                        'name': app_name,
+                        'hostname': app_hostname_map.get(app_name, [app_name])[0] if app_hostname_map.get(app_name) else app_name,
+                        'hostnames': app_hostname_map.get(app_name, [app_name]),
+                        'status': 'DOWN',
+                        'http': {'status': 'DOWN', 'code': 0, 'latency_ms': None},
+                        'pods': {
+                            'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
+                            'running_list': [], 'pending_list': [], 'crashloop_list': [],
+                            'error': 'Status check timeout'
+                        }
+                    })
                 except Exception as e:
                     print(f"❌ Error getting live status for {app_name}: {str(e)}")
                     import traceback
@@ -966,8 +1139,10 @@ def get_all_apps_live():
                     results.append({
                         'app': app_name,
                         'name': app_name,
-                        'hostname': app_name,
+                        'hostname': app_hostname_map.get(app_name, [app_name])[0] if app_hostname_map.get(app_name) else app_name,
+                        'hostnames': app_hostname_map.get(app_name, [app_name]),
                         'status': 'DOWN',
+                        'http': {'status': 'DOWN', 'code': 0, 'latency_ms': None},
                         'pods': {
                             'running': 0, 'pending': 0, 'crashloop': 0, 'total': 0,
                             'running_list': [], 'pending_list': [], 'crashloop_list': [],
@@ -998,13 +1173,14 @@ def lambda_handler(event, context):
                 'service': 'EKS Application Controller API',
                 'version': '1.0',
                 'endpoints': {
-                    'GET /apps': 'List all applications (requires authentication)',
+                    'GET /apps': 'List all applications',
                     'GET /apps/{app_name}': 'Get application details',
                     'GET /apps/{app_name}/cost': 'Get application cost data',
                     'GET /apps/{app_name}/schedule': 'Get application schedule',
-                    'POST /apps/{app_name}/schedule': 'Update application schedule',
+                    'POST /apps/{app_name}/schedule': 'Update application schedule (disabled - global schedule only)',
                     'POST /apps/{app_name}/schedule/enable': 'Toggle schedule enabled',
                     'GET /status/quick?app={app_name}': 'Quick status check',
+                    'GET /config/info': 'Get active config file name',
                     'POST /start': 'Start application',
                     'POST /stop': 'Stop application',
                     'POST /db/start': 'Start database EC2 instance',
@@ -1015,6 +1191,21 @@ def lambda_handler(event, context):
                 'documentation': 'See README.md for API documentation'
             }, default=str)
         }
+    
+    # Handle GET /config/info - return active config name
+    if http_method == 'GET' and path == '/config/info':
+        config_name = os.environ.get('CONFIG_NAME', 'config.yaml')
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({
+                'config_name': config_name
+            }, default=str)
+        }
+    
     path_params = event.get('pathParameters') or {}
     
     try:

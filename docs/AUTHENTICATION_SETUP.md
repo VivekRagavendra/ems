@@ -1,300 +1,255 @@
 # Authentication Setup Guide
 
+This guide explains how to set up AWS Cognito authentication for the EKS Application Controller dashboard.
+
 ## Overview
 
-The EKS Application Controller now supports AWS Cognito authentication for secure access to the dashboard and API. This provides:
+The dashboard now requires users to authenticate via AWS Cognito before accessing the API. This provides:
 
-- ✅ User authentication (email/password)
-- ✅ JWT token-based API authorization
-- ✅ Session management
 - ✅ Secure access control
+- ✅ User management via AWS Cognito
+- ✅ JWT token-based authentication
+- ✅ Session management
 
-## Architecture
+## Prerequisites
 
-```
-┌─────────────────┐
-│  React UI       │
-│  (S3/CloudFront)│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Cognito        │  ← User Authentication
-│  User Pool      │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  API Gateway    │  ← JWT Authorizer
-│  + Authorizer   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Lambda         │
-│  Functions      │
-└─────────────────┘
-```
+1. Cognito User Pool and Client already deployed (via Terraform)
+2. AWS CLI configured with appropriate permissions
+3. Access to update Cognito configuration
 
-## Deployment Steps
+## Setup Steps
 
-### Step 1: Deploy Infrastructure
+### Step 1: Get Cognito Configuration Values
 
-Deploy the Cognito resources and updated API Gateway:
+Run the helper script to automatically fetch and update your config:
 
 ```bash
-cd infrastructure
-terragrunt apply
+cd /Users/viveks/EMS
+export CONFIG_NAME=config.demo.yaml
+bash scripts/get-cognito-config.sh
 ```
 
-This creates:
-- Cognito User Pool
-- Cognito User Pool Client
-- Cognito User Pool Domain
-- API Gateway JWT Authorizer
-- Updated API Gateway routes (with authentication)
+This will:
+- Find your Cognito User Pool
+- Get the Client ID
+- Update `config/config.demo.yaml` with the values
 
-### Step 2: Get Cognito Configuration
+### Step 2: Update Cognito Callback URLs
 
-After deployment, get the Cognito configuration:
+The Cognito client needs to know which URLs are allowed for redirects after login.
 
+**Get your S3 bucket website URL:**
 ```bash
-# Get User Pool ID
-USER_POOL_ID=$(terragrunt output -raw cognito_user_pool_id)
-
-# Get Client ID
-CLIENT_ID=$(terragrunt output -raw cognito_client_id)
-
-# Get Domain
-DOMAIN=$(terragrunt output -raw cognito_domain)
-
-echo "User Pool ID: $USER_POOL_ID"
-echo "Client ID: $CLIENT_ID"
-echo "Domain: $DOMAIN"
+# From config.demo.yaml
+S3_BUCKET=$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['s3']['ui_bucket_name'])")
+REGION=$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['aws']['region'])")
+echo "S3 Website URL: http://${S3_BUCKET}.s3-website-${REGION}.amazonaws.com"
 ```
 
-### Step 3: Create Initial User
-
-Create the first user in Cognito:
-
+**Update Cognito callback URLs:**
 ```bash
-# Option 1: Using AWS CLI
-aws cognito-idp admin-create-user \
-  --user-pool-id $USER_POOL_ID \
-  --username admin@example.com \
-  --user-attributes Name=email,Value=admin@example.com Name=email_verified,Value=true \
-  --temporary-password "TempPass123!" \
-  --message-action SUPPRESS
-
-# Set permanent password
-aws cognito-idp admin-set-user-password \
-  --user-pool-id $USER_POOL_ID \
-  --username admin@example.com \
-  --password "YourSecurePassword123!" \
-  --permanent
-```
-
-**Or** use the AWS Console:
-1. Go to AWS Console → Cognito → User Pools
-2. Select your user pool
-3. Go to "Users" tab
-4. Click "Create user"
-5. Enter email and temporary password
-6. User will be prompted to change password on first login
-
-### Step 4: Update Cognito Callback URLs
-
-After deploying the UI, update the Cognito callback URLs:
-
-```bash
-# Get your S3 bucket URL (or CloudFront URL)
-S3_URL="https://your-bucket-name.s3-website-us-east-1.amazonaws.com"
+# Get User Pool ID and Client ID from config
+POOL_ID=$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['cognito']['user_pool_id'])")
+CLIENT_ID=$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['cognito']['client_id'])")
+S3_URL="http://$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['s3']['ui_bucket_name'])").s3-website-$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['aws']['region'])").amazonaws.com"
 
 # Update callback URLs
 aws cognito-idp update-user-pool-client \
-  --user-pool-id $USER_POOL_ID \
-  --client-id $CLIENT_ID \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --region us-east-1 \
   --callback-urls "http://localhost:5173" "$S3_URL" \
   --logout-urls "http://localhost:5173" "$S3_URL"
 ```
 
-### Step 5: Build and Deploy UI
+### Step 3: Deploy UI with Authentication
 
-Build the UI with Cognito configuration:
+Deploy the UI with Cognito configuration:
 
 ```bash
-cd ui
-
-# Install dependencies (including amazon-cognito-identity-js)
-npm install
-
-# Create .env.production with Cognito config
-cat > .env.production << EOF
-VITE_API_URL=$(cd ../infrastructure && terragrunt output -raw api_gateway_url)
-VITE_COGNITO_USER_POOL_ID=$USER_POOL_ID
-VITE_COGNITO_CLIENT_ID=$CLIENT_ID
-EOF
-
-# Build
-npm run build
-
-# Deploy to S3
-S3_BUCKET=your-bucket-name
-aws s3 sync dist/ s3://$S3_BUCKET/ --delete
+export CONFIG_NAME=config.demo.yaml
+bash scripts/deploy-ui.sh
 ```
 
-### Step 6: Test Authentication
+This will:
+- Build the React app with Cognito environment variables
+- Deploy to S3
+- Enable authentication in the UI
 
-1. Open the dashboard URL
-2. You should see the login screen
-3. Enter your email and password
-4. After successful login, you'll see the dashboard
+### Step 4: Create Test User
 
-## Configuration
-
-### Environment Variables
-
-The UI requires these environment variables (set during build):
-
-- `VITE_API_URL`: API Gateway endpoint URL
-- `VITE_COGNITO_USER_POOL_ID`: Cognito User Pool ID
-- `VITE_COGNITO_CLIENT_ID`: Cognito User Pool Client ID
-
-### Optional: Disable Authentication
-
-If you want to temporarily disable authentication (for testing), simply don't set the Cognito environment variables. The UI will work without authentication, but the API Gateway will still require tokens.
-
-To disable API Gateway authentication:
-1. Comment out the `authorizer_id` and `authorization_type` in `infrastructure/api_gateway.tf`
-2. Run `terragrunt apply`
-
-## User Management
-
-### Create Users
+Create a test user in Cognito:
 
 ```bash
-# Create user
+# Get User Pool ID
+POOL_ID=$(python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c['cognito']['user_pool_id'])")
+
+# Create user (replace email and password)
+EMAIL="admin@example.com"
+PASSWORD="TempPassword123!"
+
 aws cognito-idp admin-create-user \
-  --user-pool-id $USER_POOL_ID \
-  --username user@example.com \
-  --user-attributes Name=email,Value=user@example.com \
-  --temporary-password "TempPass123!"
+  --user-pool-id "$POOL_ID" \
+  --username "$EMAIL" \
+  --user-attributes Name=email,Value="$EMAIL" Name=email_verified,Value=true \
+  --temporary-password "$PASSWORD" \
+  --region us-east-1
 
-# Set permanent password
+# Set permanent password (user will be prompted to change on first login)
 aws cognito-idp admin-set-user-password \
-  --user-pool-id $USER_POOL_ID \
-  --username user@example.com \
-  --password "SecurePassword123!" \
-  --permanent
+  --user-pool-id "$POOL_ID" \
+  --username "$EMAIL" \
+  --password "$PASSWORD" \
+  --permanent \
+  --region us-east-1
+
+echo "✅ User created: $EMAIL"
+echo "   Password: $PASSWORD"
 ```
 
-### List Users
+### Step 5: Deploy API Gateway Changes
+
+Apply the API Gateway route changes to enable authentication:
 
 ```bash
-aws cognito-idp list-users \
-  --user-pool-id $USER_POOL_ID
+cd infrastructure
+export CONFIG_NAME=config.demo.yaml
+terragrunt apply -target=aws_apigatewayv2_route.get_apps \
+                  -target=aws_apigatewayv2_route.start_app \
+                  -target=aws_apigatewayv2_route.stop_app \
+                  -target=aws_apigatewayv2_route.db_start \
+                  -target=aws_apigatewayv2_route.db_stop \
+                  -target=aws_apigatewayv2_route.ec2_start \
+                  -target=aws_apigatewayv2_route.ec2_stop \
+                  -target=aws_apigatewayv2_route.get_app_cost \
+                  -target=aws_apigatewayv2_route.get_app_schedule \
+                  -target=aws_apigatewayv2_route.post_app_schedule \
+                  -target=aws_apigatewayv2_route.post_app_schedule_enable
 ```
 
-### Delete User
-
+Or apply all changes:
 ```bash
-aws cognito-idp admin-delete-user \
-  --user-pool-id $USER_POOL_ID \
-  --username user@example.com
+terragrunt apply
 ```
 
-### Reset Password
+## Testing Authentication
 
-```bash
-aws cognito-idp admin-reset-user-password \
-  --user-pool-id $USER_POOL_ID \
-  --username user@example.com \
-  --no-verify-email
-```
+1. **Access the dashboard:**
+   - Navigate to your S3 website URL
+   - You should see a login page
 
-## Security Features
+2. **Login:**
+   - Enter the email and password you created
+   - Click "Sign In"
+   - You should be redirected to the dashboard
 
-### Password Policy
+3. **Verify API calls:**
+   - Open browser DevTools (F12)
+   - Check Network tab
+   - API requests should include `Authorization: Bearer <token>` header
 
-The Cognito User Pool enforces:
-- Minimum 8 characters
-- Requires uppercase letter
-- Requires lowercase letter
-- Requires number
-- Requires symbol
-
-### Session Management
-
-- Tokens are stored in localStorage
-- Tokens are automatically refreshed when expired
-- Users are logged out if token refresh fails
-
-### API Authorization
-
-- All API calls include `Authorization: Bearer <token>` header
-- API Gateway validates JWT tokens
-- Invalid/expired tokens result in 401 Unauthorized
+4. **Logout:**
+   - Click the "Logout" button in the header
+   - You should be redirected back to login
 
 ## Troubleshooting
 
-### "Cognito not configured" Warning
+### "Cognito not configured" warning
 
-**Issue**: UI shows warning about missing Cognito configuration.
+**Issue:** UI shows warning about Cognito not being configured.
 
-**Solution**: Ensure environment variables are set during build:
-```bash
-VITE_COGNITO_USER_POOL_ID=... VITE_COGNITO_CLIENT_ID=... npm run build
-```
+**Solution:**
+1. Verify `config/config.demo.yaml` has Cognito values:
+   ```bash
+   python3 -c "import yaml; f=open('config/config.demo.yaml'); c=yaml.safe_load(f); print(c.get('cognito', {}))"
+   ```
 
-### "401 Unauthorized" Error
+2. Redeploy UI:
+   ```bash
+   bash scripts/deploy-ui.sh
+   ```
 
-**Issue**: API calls fail with 401.
+### "401 Unauthorized" errors
 
-**Solutions**:
-1. Check if token is expired - try logging out and back in
-2. Verify API Gateway authorizer is configured correctly
-3. Check Cognito User Pool and Client IDs match
+**Issue:** API returns 401 Unauthorized.
 
-### Login Fails
+**Solution:**
+1. Check if user is logged in (check localStorage for `cognito_token`)
+2. Verify token is being sent in requests (check Network tab)
+3. Check if API Gateway routes have authorizer attached:
+   ```bash
+   aws apigatewayv2 get-route --api-id <api-id> --route-id <route-id> --region us-east-1
+   ```
 
-**Issue**: Cannot log in with valid credentials.
+### Login page not showing
 
-**Solutions**:
-1. Verify user exists in Cognito User Pool
-2. Check if user is confirmed (email verified)
-3. Verify password is correct
-4. Check browser console for errors
+**Issue:** Dashboard loads without login page.
 
-### Callback URL Mismatch
+**Solution:**
+1. Check if Cognito env vars are set in `.env.production`:
+   ```bash
+   cat ui/.env.production
+   ```
 
-**Issue**: Login redirect fails.
+2. Verify `VITE_COGNITO_USER_POOL_ID` and `VITE_COGNITO_CLIENT_ID` are present
 
-**Solution**: Update Cognito callback URLs to match your dashboard URL:
-```bash
-aws cognito-idp update-user-pool-client \
-  --user-pool-id $USER_POOL_ID \
-  --client-id $CLIENT_ID \
-  --callback-urls "https://your-dashboard-url.com"
-```
+3. Rebuild and redeploy:
+   ```bash
+   cd ui
+   npm run build
+   cd ..
+   bash scripts/deploy-ui.sh
+   ```
 
-## Cost
+### Token expired errors
 
-- **Cognito**: $0.0055 per MAU (Monthly Active User)
-- **First 50,000 MAU**: Free
-- **Estimated cost**: $0-5/month for <100 users
+**Issue:** User gets logged out frequently.
+
+**Solution:**
+- Tokens expire after 1 hour by default
+- The UI automatically refreshes tokens
+- If issues persist, check Cognito token expiration settings
+
+## Security Considerations
+
+1. **HTTPS:** For production, use CloudFront with HTTPS instead of S3 website hosting
+2. **Password Policy:** Cognito enforces strong passwords (configured in `infrastructure/cognito.tf`)
+3. **MFA:** Consider enabling MFA for additional security
+4. **User Management:** Use Cognito User Pool for user management, or integrate with your identity provider
+
+## API Routes Requiring Authentication
+
+All API routes now require authentication:
+
+- `GET /apps` - List applications
+- `POST /start` - Start application
+- `POST /stop` - Stop application
+- `POST /db/start` - Start database
+- `POST /db/stop` - Stop database
+- `POST /ec2/start` - Start EC2 instance
+- `POST /ec2/stop` - Stop EC2 instance
+- `GET /apps/{app}/cost` - Get cost data
+- `GET /apps/{app}/schedule` - Get schedule
+- `POST /apps/{app}/schedule` - Update schedule
+- `POST /apps/{app}/schedule/enable` - Toggle schedule
+
+**Public routes (no auth):**
+- `GET /` - API information
+- `GET /config/info` - Config information
+- `OPTIONS /*` - CORS preflight
 
 ## Next Steps
 
-After authentication is working:
+1. ✅ Complete setup steps above
+2. Create additional users as needed
+3. Configure user groups/roles if needed
+4. Set up CloudFront for HTTPS (recommended for production)
+5. Configure MFA for enhanced security
 
-1. **Add MFA** (optional): Enable MFA in Cognito User Pool settings
-2. **Custom Domain** (optional): Use your own domain for Cognito hosted UI
-3. **User Groups** (optional): Create user groups for role-based access
-4. **Password Reset**: Enable self-service password reset
+## Support
 
-## References
-
-- [AWS Cognito Documentation](https://docs.aws.amazon.com/cognito/)
-- [amazon-cognito-identity-js](https://github.com/amazon-archives/amazon-cognito-identity-js)
-- [API Gateway JWT Authorizer](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html)
-
+For issues or questions:
+1. Check browser console for errors
+2. Check CloudWatch logs for API Handler Lambda
+3. Verify Cognito configuration in AWS Console
+4. Review this guide for troubleshooting steps

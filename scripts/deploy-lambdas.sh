@@ -43,16 +43,21 @@ package_lambda() {
         cp -r "$lambda_dir/config" "$temp_dir/"
     fi
     
-    # Copy config.yaml to Lambda package root (for Lambda runtime)
-    if [ -f "$PROJECT_ROOT/config/config.yaml" ]; then
+    # Copy all config files to Lambda package (for multi-account support)
+    if [ -d "$PROJECT_ROOT/config" ]; then
         mkdir -p "$temp_dir/config"
-        cp "$PROJECT_ROOT/config/config.yaml" "$temp_dir/config/"
+        # Copy all config.*.yaml files (config.yaml, config.prod.yaml, config.uat.yaml, etc.)
+        cp "$PROJECT_ROOT/config"/config*.yaml "$temp_dir/config/" 2>/dev/null || true
+        # Also copy config.example.yaml if it exists
+        if [ -f "$PROJECT_ROOT/config/config.example.yaml" ]; then
+            cp "$PROJECT_ROOT/config/config.example.yaml" "$temp_dir/config/" 2>/dev/null || true
+        fi
     fi
     
     # Install dependencies if requirements.txt exists
     if [ -f "$lambda_dir/requirements.txt" ]; then
         echo "Installing dependencies for $lambda_name..."
-        pip install -r "$lambda_dir/requirements.txt" -t "$temp_dir" --quiet
+        python3 -m pip install -r "$lambda_dir/requirements.txt" -t "$temp_dir" --quiet
     fi
     
     # Create zip file

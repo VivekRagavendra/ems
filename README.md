@@ -18,6 +18,7 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
 - ✅ **Per-Application Cost Tracking**: Daily and monthly cost tracking with detailed breakdowns (NodeGroups, PostgreSQL, Neo4j, EBS, Network)
 - ✅ **Intelligent Auto-Scheduling**: Global schedule (Mon-Fri 09:00-22:00 IST, weekend shutdown) with per-app enable/disable switches
 - ✅ **Self-Service Web Dashboard**: Modern React UI with real-time status updates and component-level indicators
+- ✅ **AWS Cognito Authentication**: Secure login with JWT token-based authentication for API access
 - ✅ **Auto-Discovery**: Automatically detects applications by scanning Kubernetes Ingress resources
 - ✅ **ConfigMap-Based Database Discovery**: Reads database connection details from Kubernetes ConfigMaps (`common-config`)
 - ✅ **Smart Start Workflow**: 
@@ -72,6 +73,7 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
   - Pod counts from live Kubernetes API calls
   - HTTP status from live HTTP HEAD requests
 - ✅ **Zero Maintenance**: Automatically adapts when new applications are added
+- ✅ **Multi-Account Support**: Deploy same codebase to multiple AWS accounts using different config files
 - ✅ **Hard-Coded Application Mappings**: 
   - Namespace mappings: Authoritative source for application → namespace (overrides auto-discovery)
   - NodeGroup mappings: Authoritative source for application → NodeGroup with default scaling values
@@ -130,7 +132,8 @@ An intelligent, self-service system for managing application lifecycle in AWS EK
   - App Costs: Daily and monthly cost records
   - App Schedules: Per-app enable/disable flags (times/weekdays are globally configured)
   - Operation Logs: Operation history
-- **API Gateway**: HTTP API for dashboard and automation (includes quick-status, cost, schedule, DB/EC2 control endpoints)
+- **API Gateway**: HTTP API for dashboard and automation (includes quick-status, cost, schedule, DB/EC2 control endpoints) with Cognito JWT authentication
+- **AWS Cognito**: User authentication and authorization (User Pool, Client, Domain)
 - **EventBridge**: Scheduled triggers for discovery, health checks, cost tracking, and scheduling
 - **React Dashboard**: Lightweight web UI with real-time live status updates, cost tracking, and scheduling
 
@@ -299,6 +302,7 @@ Quick 297-line reference for the 2.5-day implementation:
 |----------|-------------|
 | [QUICKSTART.md](QUICKSTART.md) | Quick setup guide |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed deployment instructions |
+| [docs/MULTI_ACCOUNT_CONFIG.md](docs/MULTI_ACCOUNT_CONFIG.md) | Multi-account deployment guide |
 | [docs/PREREQUISITES.md](docs/PREREQUISITES.md) | Prerequisites checklist |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and design |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operations and troubleshooting |
@@ -488,14 +492,21 @@ See [COST_FAQ.md](COST_FAQ.md) for quick answers, [COST_SUMMARY.md](COST_SUMMARY
     - `ec2:DescribeInstances` for live database state checks
     - `autoscaling:DescribeAutoScalingGroups` for current node counts
     - Kubernetes API access for pod counts (requires RBAC - see [docs/POD_RBAC_SETUP.md](docs/POD_RBAC_SETUP.md))
-- **API Gateway**: Currently public (add authentication for production)
-- **Dashboard**: Public access (add CloudFront signed URLs or authentication)
+- **API Gateway**: Protected with AWS Cognito JWT authentication (all routes require valid token)
+- **Dashboard**: Requires Cognito login before accessing (username/password authentication)
 - **Secrets**: No hardcoded credentials (uses IAM roles)
 - **ConfigMap Access**: Discovery Lambda reads ConfigMaps using Kubernetes RBAC (read-only)
 
+**Authentication:**
+- **AWS Cognito**: User Pool with username/password authentication
+- **JWT Tokens**: All API requests require valid Cognito JWT token
+- **Session Management**: Tokens stored in browser localStorage, auto-refreshed on expiration
+- **Login Flow**: Users must log in via dashboard login page before accessing applications
+
 **Production Recommendations:**
-- Add AWS Cognito or API Keys for API Gateway
-- Use CloudFront signed URLs for dashboard
+- Use CloudFront with HTTPS for dashboard (S3 static hosting is HTTP-only)
+- Enable MFA for additional security
+- Configure user groups/roles in Cognito for fine-grained access control
 - Enable CloudTrail for audit logging
 - Review and restrict IAM policies
 - Consider VPC endpoints for Lambda functions accessing EKS
@@ -538,6 +549,8 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
 
 ### Dashboard URL
 **Live Dashboard**: http://eks-app-controller-ui-420464349284.s3-website-us-east-1.amazonaws.com/
+
+**Authentication Required:** Users must log in with Cognito credentials before accessing the dashboard.
 
 ### Features
 - **Real-Time Live Status**: Auto-refreshes every 5 seconds with fresh data from API
@@ -587,6 +600,12 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
   - Configurable ON/OFF times and weekdays
   - Next auto-start/stop time display
   - Runtime schedule overrides via dashboard
+- **AWS Cognito Authentication**: 
+  - Secure login page with username/password
+  - JWT token-based API authentication
+  - Session management with auto-refresh
+  - Logout functionality
+  - See [docs/AUTHENTICATION_SETUP.md](docs/AUTHENTICATION_SETUP.md) for setup instructions
 - **Modern UI**: Clean card design with dark mode support
 - **Responsive Design**: Works on desktop and mobile devices
 - **Search & Filter**: Find applications quickly by name, namespace, or hostname
@@ -594,20 +613,23 @@ The codebase includes a **modern React dashboard** (~100KB gzipped) with:
 ### API Endpoints
 **API Gateway URL**: https://6rgavd4jt7.execute-api.us-east-1.amazonaws.com
 
+**Authentication:** All endpoints (except `/` and `/config/info`) require a valid Cognito JWT token in the `Authorization: Bearer <token>` header.
+
 **Available Endpoints:**
-- `GET /apps` - List all applications with live status
-- `GET /apps/{app_name}` - Get detailed status for an application
-- `POST /start` - Start an application (NodeGroups + databases)
-- `POST /stop` - Stop an application (NodeGroups + databases)
-- `GET /status/quick?app={app_name}` - Quick status check (UP/DOWN/UNKNOWN)
-- `GET /apps/{app_name}/cost` - Get cost data for an application
-- `GET /apps/{app_name}/schedule` - Get global schedule + enabled flag (read-only)
-- `POST /apps/{app_name}/schedule` - **DISABLED** (returns HTTP 400 - schedule editing disabled)
-- `POST /apps/{app_name}/schedule/enable` - Toggle schedule enabled status (only editable field)
-- `POST /db/start` - Manually start a database (PostgreSQL or Neo4j)
-- `POST /db/stop` - Manually stop a database (PostgreSQL or Neo4j)
-- `POST /ec2/start` - Manually start an EC2 instance
-- `POST /ec2/stop` - Manually stop an EC2 instance
+- `GET /apps` - List all applications with live status (🔐 Auth required)
+- `GET /apps/{app_name}` - Get detailed status for an application (🔐 Auth required)
+- `POST /start` - Start an application (NodeGroups + databases) (🔐 Auth required)
+- `POST /stop` - Stop an application (NodeGroups + databases) (🔐 Auth required)
+- `GET /status/quick?app={app_name}` - Quick status check (UP/DOWN/UNKNOWN) (🔐 Auth required)
+- `GET /apps/{app_name}/cost` - Get cost data for an application (🔐 Auth required)
+- `GET /apps/{app_name}/schedule` - Get global schedule + enabled flag (read-only) (🔐 Auth required)
+- `POST /apps/{app_name}/schedule` - **DISABLED** (returns HTTP 400 - schedule editing disabled) (🔐 Auth required)
+- `POST /apps/{app_name}/schedule/enable` - Toggle schedule enabled status (only editable field) (🔐 Auth required)
+- `GET /config/info` - Get active config file name (for multi-account deployments) (Public)
+- `POST /db/start` - Manually start a database (PostgreSQL or Neo4j) (🔐 Auth required)
+- `POST /db/stop` - Manually stop a database (PostgreSQL or Neo4j) (🔐 Auth required)
+- `POST /ec2/start` - Manually start an EC2 instance (🔐 Auth required)
+- `POST /ec2/stop` - Manually stop an EC2 instance (🔐 Auth required)
 
 See [docs/DASHBOARD_INFO.md](docs/DASHBOARD_INFO.md) for detailed features and deployment.
 
@@ -870,6 +892,8 @@ The system provides **real-time, live status monitoring** with **NO CACHING**. A
    - Verify API Gateway URL is correct
    - Check CORS configuration
    - Review browser console
+   - **401 Unauthorized**: Logout and login again to get fresh token, or check API Gateway authorizer configuration
+   - **Login fails**: Verify Cognito User Pool ID and Client ID in config, check user exists and is confirmed
 
 4. **Dashboard not showing live updates**
    - API Handler performs all checks live (no caching)
@@ -906,7 +930,17 @@ This project is provided as-is for use in your environment.
 
 ## 🆕 Recent Updates
 
-### **Manual Database & EC2 Controls** (Latest)
+### **AWS Cognito Authentication** (Latest)
+- ✅ **Secure Login**: Username/password authentication via AWS Cognito
+- ✅ **JWT Token Authentication**: All API routes protected with Cognito JWT authorizer
+- ✅ **Session Management**: Tokens stored in localStorage with auto-refresh
+- ✅ **Login UI**: Integrated login page in React dashboard
+- ✅ **User Management**: Create and manage users via AWS Cognito User Pool
+- ✅ **API Gateway Integration**: All API routes require valid JWT token
+- ✅ **Configuration**: Cognito User Pool ID, Client ID, and Domain configured in `config.yaml`
+- ✅ See [docs/AUTHENTICATION_SETUP.md](docs/AUTHENTICATION_SETUP.md) for setup instructions
+
+### **Manual Database & EC2 Controls** (Previous)
 - ✅ Manual Start/Stop buttons for PostgreSQL and Neo4j EC2 instances
 - ✅ Direct EC2 instance control via `/ec2/start` and `/ec2/stop` endpoints
 - ✅ Independent database control from application start/stop operations
@@ -951,10 +985,23 @@ This project is provided as-is for use in your environment.
 - ✅ Detailed pod information (running, pending, crashloop)
 - ✅ Graceful error handling for missing permissions
 
+### **AWS Cognito Authentication** (Latest)
+- ✅ **Secure Login**: Username/password authentication via AWS Cognito
+- ✅ **JWT Token Authentication**: All API routes protected with Cognito JWT authorizer
+- ✅ **Session Management**: Tokens stored in localStorage with auto-refresh
+- ✅ **Login UI**: Integrated login page in React dashboard
+- ✅ **User Management**: Create and manage users via AWS Cognito User Pool
+- ✅ **API Gateway Integration**: All API routes require valid JWT token
+- ✅ **Configuration**: Cognito User Pool ID, Client ID, and Domain configured in `config.yaml`
+- ✅ See [docs/AUTHENTICATION_SETUP.md](docs/AUTHENTICATION_SETUP.md) for setup instructions
+
 ### **Multi-Account Configuration** (Previous)
-- ✅ Centralized `config/config.yaml` for all account settings
-- ✅ Single source of truth for namespace and NodeGroup mappings
-- ✅ Easy deployment to new AWS accounts
+- ✅ **Multiple Config Files**: Support for `config.yaml`, `config.prod.yaml`, `config.uat.yaml`, `config.qa.yaml`, etc.
+- ✅ **Environment-Based Selection**: Lambda functions load config based on `CONFIG_NAME` environment variable
+- ✅ **Single Codebase**: Same codebase works for all AWS accounts without separate branches
+- ✅ **Easy Deployment**: Change only `config_name` in terragrunt.hcl to deploy to different accounts
+- ✅ **Config Info Endpoint**: `GET /config/info` returns active config file name
+- ✅ **Automatic Packaging**: Build script copies all config files to Lambda packages
 
 ---
 

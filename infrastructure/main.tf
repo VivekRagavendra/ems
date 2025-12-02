@@ -25,6 +25,18 @@ variable "lambda_runtime" {
   default     = "python3.11"
 }
 
+variable "config_name" {
+  description = "Config file name to use (e.g., config.yaml, config.prod.yaml, config.uat.yaml)"
+  type        = string
+  default     = "config.yaml"
+}
+
+variable "aws_account_id" {
+  description = "AWS account ID (used for resource naming to avoid conflicts)"
+  type        = string
+  default     = ""
+}
+
 # DynamoDB Table for App Registry and Resource Locks
 # Uses single table design: app_name for apps, LOCK#DB#<id> for locks
 resource "aws_dynamodb_table" "app_registry" {
@@ -178,6 +190,17 @@ resource "aws_iam_role_policy" "discovery_lambda_policy" {
           "ec2:DescribeTags"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -252,6 +275,17 @@ resource "aws_iam_role_policy" "controller_lambda_policy" {
       {
         Effect = "Allow"
         Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "lambda:InvokeFunction"  # Required: Self-invoke for async operations
         ]
         Resource = "arn:aws:lambda:*:*:function:${var.project_name}-controller"
@@ -313,6 +347,17 @@ resource "aws_iam_role_policy" "health_monitor_lambda_policy" {
         Effect = "Allow"
         Action = [
           "ec2:DescribeInstances"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
         ]
         Resource = "*"
       }
@@ -394,6 +439,17 @@ resource "aws_iam_role_policy" "api_handler_lambda_policy" {
         ]
         Resource = "*"
         # Required to get actual current node count for NodeGroups
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -543,6 +599,17 @@ resource "aws_iam_role_policy" "scheduler_lambda_policy" {
         Resource = [
           "arn:aws:lambda:*:*:function:${var.project_name}-*"
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
+        ]
+        Resource = "*"
       }
     ]
   })

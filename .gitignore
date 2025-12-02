@@ -6,6 +6,12 @@ build/
 # Lambda package directories (build artifacts)
 lambdas/*/package/
 
+# Test results
+test-results-*.txt
+
+# Archive directory (contains moved unused files)
+archive/
+
 # Python
 __pycache__/
 *.py[cod]
